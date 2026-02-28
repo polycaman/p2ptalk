@@ -21,7 +21,10 @@ import {
 import { createPeerConnection } from '$lib/webrtc';
 import { joinRoom, hangUp } from '$lib/callActions';
 import { initiateChatConnection, handleChatSignal, cleanupChatPeer } from '$lib/chatWebrtc';
-import { conversations } from '$lib/stores/chatStore';
+import {
+    conversations, chatMessages, activeConversationId as activeConvId,
+    unreadCounts as unreadStore, typingUsers as typingStore
+} from '$lib/stores/chatStore';
 import type { Socket } from 'socket.io-client';
 
 export function initSocketEvents(sock: Socket, pageData: any) {
@@ -290,6 +293,41 @@ export function initSocketEvents(sock: Socket, pageData: any) {
     // ─── Chat P2P Signaling ──────────────────────────────
     sock.on('chat-signal', ({ signal, from }: { signal: any; from: string }) => {
         handleChatSignal(signal, from);
+    });
+
+    // ─── Chat Relay (server fallback when P2P unavailable) ──
+    sock.on('relay-chat-message', ({ conversationId, message }: any) => {
+        if (!conversationId || !message) return;
+        chatMessages.update((msgs: any) => {
+            const convMsgs = msgs[conversationId] || [];
+            if (convMsgs.find((m: any) => m.id === message.id)) return msgs;
+            return { ...msgs, [conversationId]: [...convMsgs, message] };
+        });
+        conversations.update((convs: any) => convs.map((c: any) =>
+            c.id === conversationId
+                ? { ...c, lastMessage: message, lastActivity: message.timestamp }
+                : c
+        ));
+        if (get(activeConvId) !== conversationId) {
+            unreadStore.update((uc: any) => ({
+                ...uc,
+                [conversationId]: (uc[conversationId] || 0) + 1
+            }));
+        }
+    });
+
+    sock.on('relay-typing', ({ conversationId, userId, username, isTyping }: any) => {
+        typingStore.update((tu: any) => {
+            const current = tu[conversationId] || [];
+            if (isTyping) {
+                if (!current.find((u: any) => u.userId === userId)) {
+                    return { ...tu, [conversationId]: [...current, { userId, username }] };
+                }
+            } else {
+                return { ...tu, [conversationId]: current.filter((u: any) => u.userId !== userId) };
+            }
+            return tu;
+        });
     });
 
     sock.on('conversation-created', (conversation: any) => {

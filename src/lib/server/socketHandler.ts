@@ -566,6 +566,46 @@ export default function injectSocketIO(server: any) {
         }
     });
 
+    // ─── Chat: Server Relay (fallback when P2P DataChannel unavailable) ──
+    socket.on('relay-chat-message', async (data) => {
+        if (!data?.conversationId || !data?.message) return;
+        // Verify sender is a member of this conversation
+        const members = await getConversationMembersList(data.conversationId);
+        const isMember = members.some(m => m.userId === authenticatedUserId);
+        if (!isMember) return;
+        // Forward to all other online members
+        for (const m of members) {
+            if (m.userId === authenticatedUserId) continue;
+            const targetSock = userSockets.get(m.userId);
+            if (targetSock) {
+                io.to(targetSock).emit('relay-chat-message', {
+                    conversationId: data.conversationId,
+                    message: { ...data.message, senderId: authenticatedUserId },
+                    from: authenticatedUserId
+                });
+            }
+        }
+    });
+
+    socket.on('relay-typing', async (data) => {
+        if (!data?.conversationId) return;
+        const members = await getConversationMembersList(data.conversationId);
+        const isMember = members.some(m => m.userId === authenticatedUserId);
+        if (!isMember) return;
+        for (const m of members) {
+            if (m.userId === authenticatedUserId) continue;
+            const targetSock = userSockets.get(m.userId);
+            if (targetSock) {
+                io.to(targetSock).emit('relay-typing', {
+                    conversationId: data.conversationId,
+                    userId: authenticatedUserId,
+                    username: data.username,
+                    isTyping: !!data.isTyping
+                });
+            }
+        }
+    });
+
     // ─── Chat: Update Group ──────────────────────────────────
     socket.on('update-group-chat', async ({ conversationId, name, description }) => {
         if (!isNonEmptyString(conversationId)) return;
