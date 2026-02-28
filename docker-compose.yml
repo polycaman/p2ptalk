@@ -45,7 +45,7 @@ services:
       DOMAIN: ${DOMAIN}
     depends_on:
       - app
-    entrypoint: /docker-entrypoint.sh
+    entrypoint: ["sh", "/docker-entrypoint.sh"]
 
   certbot:
     image: certbot/certbot
@@ -59,7 +59,7 @@ services:
       CERTBOT_EMAIL: ${CERTBOT_EMAIL}
     depends_on:
       - nginx
-    entrypoint: /certbot-entrypoint.sh
+    entrypoint: ["sh", "/certbot-entrypoint.sh"]
 
 volumes:
   db_data:
