@@ -48,33 +48,83 @@ let CHAT_RTC_CONFIG: RTCConfiguration = {
     iceServers: [...STUN_SERVERS]
 };
 
+let turnReadyPromise: Promise<void> | null = null;
+
 /** Call once on init to pre-fetch TURN credentials */
-export async function initChatTurn() {
-    const turn = await getChatTurnServers();
-    CHAT_RTC_CONFIG = { iceServers: [...STUN_SERVERS, ...turn] };
+export function initChatTurn(): Promise<void> {
+    if (!turnReadyPromise) {
+        turnReadyPromise = getChatTurnServers().then(turn => {
+            CHAT_RTC_CONFIG = { iceServers: [...STUN_SERVERS, ...turn] };
+            console.log('[Chat TURN] Credentials ready,', turn.length, 'TURN servers');
+        });
+    }
+    return turnReadyPromise;
+}
+
+// Reconnection tracking: per-peer retry count + timers
+const chatReconnectAttempts = new Map<string, number>();
+const chatReconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const MAX_CHAT_RECONNECT = 5;
+
+function scheduleChatReconnect(targetUserId: string) {
+    const attempts = (chatReconnectAttempts.get(targetUserId) || 0) + 1;
+    if (attempts > MAX_CHAT_RECONNECT) {
+        console.warn(`[Chat] Max reconnect attempts reached for ${targetUserId}`);
+        chatReconnectAttempts.delete(targetUserId);
+        return;
+    }
+    chatReconnectAttempts.set(targetUserId, attempts);
+    const delay = Math.min(2000 * Math.pow(1.5, attempts - 1), 15000);
+    console.log(`[Chat] Scheduling reconnect #${attempts} to ${targetUserId} in ${delay}ms`);
+    const timer = setTimeout(() => {
+        chatReconnectTimers.delete(targetUserId);
+        const user = get(userData);
+        // Only the lower-ID user initiates to avoid duplicate connections
+        if (user && user.id < targetUserId) {
+            initiateChatConnection(targetUserId);
+        }
+    }, delay);
+    chatReconnectTimers.set(targetUserId, timer);
+}
+
+function cancelChatReconnect(targetUserId: string) {
+    const timer = chatReconnectTimers.get(targetUserId);
+    if (timer) clearTimeout(timer);
+    chatReconnectTimers.delete(targetUserId);
+    chatReconnectAttempts.delete(targetUserId);
 }
 
 // ═══════════════════════════════════════════════════════════
 // Connection Management
 // ═══════════════════════════════════════════════════════════
 
-export function initiateChatConnection(targetUserId: string) {
+export async function initiateChatConnection(targetUserId: string) {
     const existing = get(chatPeers);
     if (existing[targetUserId]) return;
 
+    // Ensure TURN credentials are loaded before creating the peer
+    await initChatTurn();
+
+    // Re-check after await (another connection may have started)
+    if (get(chatPeers)[targetUserId]) return;
+
     const peer = createChatPeer(targetUserId, true);
-    peer.createOffer()
-        .then(offer => peer.setLocalDescription(offer))
-        .then(() => {
-            get(socket).emit('chat-signal', {
-                to: targetUserId,
-                signal: peer.localDescription
-            });
-        })
-        .catch(e => console.error('[Chat] Offer creation failed:', e));
+    try {
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        get(socket).emit('chat-signal', {
+            to: targetUserId,
+            signal: peer.localDescription
+        });
+    } catch (e) {
+        console.error('[Chat] Offer creation failed:', e);
+    }
 }
 
-export function handleChatSignal(signal: any, fromUserId: string) {
+export async function handleChatSignal(signal: any, fromUserId: string) {
+    // Ensure TURN is ready before creating any peer
+    await initChatTurn();
+
     let peer = get(chatPeers)[fromUserId];
 
     if (signal.type === 'offer') {
@@ -129,14 +179,57 @@ function createChatPeer(targetUserId: string, isInitiator: boolean): RTCPeerConn
         }
     };
 
+    let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
     peer.oniceconnectionstatechange = () => {
         const state = peer.iceConnectionState;
+        console.log(`[Chat ICE] ${targetUserId}: ${state}`);
+
         if (state === 'connected' || state === 'completed') {
+            // Connection recovered — clear any pending timers and reset reconnect counter
+            if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+            cancelChatReconnect(targetUserId);
             detectRelay(peer, targetUserId, 'chat');
         }
-        if (state === 'disconnected' || state === 'closed' || state === 'failed') {
+
+        if (state === 'disconnected') {
+            // Grace period: wait 4s then try ICE restart, don't destroy immediately
+            if (!disconnectTimer) {
+                disconnectTimer = setTimeout(() => {
+                    disconnectTimer = null;
+                    if (peer.iceConnectionState === 'disconnected') {
+                        console.log(`[Chat ICE] Attempting ICE restart for ${targetUserId}`);
+                        try {
+                            peer.restartIce();
+                            const user = get(userData);
+                            // Re-negotiate if we are the initiator
+                            if (user && user.id < targetUserId) {
+                                peer.createOffer({ iceRestart: true })
+                                    .then(offer => peer.setLocalDescription(offer))
+                                    .then(() => {
+                                        get(socket).emit('chat-signal', {
+                                            to: targetUserId,
+                                            signal: peer.localDescription
+                                        });
+                                    })
+                                    .catch(() => {});
+                            }
+                        } catch { /* restartIce not supported, will fall through to failed */ }
+                    }
+                }, 4000);
+            }
+        }
+
+        if (state === 'failed') {
+            if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
             turnRelayChatPeers.update(s => { s.delete(targetUserId); return new Set(s); });
             cleanupChatPeer(targetUserId);
+            scheduleChatReconnect(targetUserId);
+        }
+
+        if (state === 'closed') {
+            if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+            turnRelayChatPeers.update(s => { s.delete(targetUserId); return new Set(s); });
         }
     };
 
@@ -153,10 +246,14 @@ export function cleanupChatPeer(userId: string) {
 }
 
 export function cleanupAllChatPeers() {
-    const peers = get(chatPeers);
-    Object.values(peers).forEach(p => { try { p.close(); } catch { /* ignore */ } });
+    const allPeers = get(chatPeers);
+    Object.values(allPeers).forEach(p => { try { p.close(); } catch { /* ignore */ } });
     chatPeers.set({});
     chatDataChannels.set({});
+    // Clear all reconnect timers
+    chatReconnectTimers.forEach(t => clearTimeout(t));
+    chatReconnectTimers.clear();
+    chatReconnectAttempts.clear();
 }
 
 // ═══════════════════════════════════════════════════════════

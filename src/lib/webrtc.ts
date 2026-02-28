@@ -200,14 +200,75 @@ export function createPeerConnection(targetUserId: string): RTCPeerConnection {
         };
     };
 
+    let iceDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let iceRestartAttempts = 0;
+    const MAX_ICE_RESTARTS = 3;
+
     peer.oniceconnectionstatechange = () => {
-        if (peer.iceConnectionState === 'connected' || peer.iceConnectionState === 'completed') {
+        const state = peer.iceConnectionState;
+        console.log(`[Call ICE] ${targetUserId}: ${state}`);
+
+        if (state === 'connected' || state === 'completed') {
+            // Connection (re-)established — reset timers
+            if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; }
+            iceRestartAttempts = 0;
             detectRelay(peer, targetUserId, 'call');
         }
-        if (peer.iceConnectionState === 'failed') {
-            console.warn(`[WebRTC] ICE connection failed with ${targetUserId}`);
+
+        if (state === 'disconnected') {
+            // Grace period: wait 3s then attempt ICE restart
+            if (!iceDisconnectTimer) {
+                iceDisconnectTimer = setTimeout(() => {
+                    iceDisconnectTimer = null;
+                    if (peer.iceConnectionState === 'disconnected' && iceRestartAttempts < MAX_ICE_RESTARTS) {
+                        iceRestartAttempts++;
+                        console.log(`[Call ICE] Attempting ICE restart #${iceRestartAttempts} for ${targetUserId}`);
+                        try {
+                            peer.restartIce();
+                            peer.createOffer({ iceRestart: true })
+                                .then(offer => peer.setLocalDescription(offer))
+                                .then(() => {
+                                    const s = get(socket);
+                                    const u = get(userData);
+                                    s.emit('signal', { to: targetUserId, from: u.id, signal: peer.localDescription });
+                                })
+                                .catch(err => console.error('[Call ICE] Restart offer failed:', err));
+                        } catch (e) {
+                            console.error('[Call ICE] restartIce failed:', e);
+                        }
+                    }
+                }, 3000);
+            }
         }
-        if (peer.iceConnectionState === 'disconnected' || peer.iceConnectionState === 'closed') {
+
+        if (state === 'failed') {
+            if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; }
+            // One last attempt via ICE restart before giving up
+            if (iceRestartAttempts < MAX_ICE_RESTARTS) {
+                iceRestartAttempts++;
+                console.log(`[Call ICE] Failed — attempting restart #${iceRestartAttempts} for ${targetUserId}`);
+                try {
+                    peer.restartIce();
+                    peer.createOffer({ iceRestart: true })
+                        .then(offer => peer.setLocalDescription(offer))
+                        .then(() => {
+                            const s = get(socket);
+                            const u = get(userData);
+                            s.emit('signal', { to: targetUserId, from: u.id, signal: peer.localDescription });
+                        })
+                        .catch(() => {});
+                } catch { /* not supported */ }
+            } else {
+                console.error(`[Call ICE] All restart attempts exhausted for ${targetUserId}`);
+                turnRelayCallPeers.update(s => { s.delete(targetUserId); return new Set(s); });
+                remoteStreams.update(rs => { delete rs[targetUserId]; return { ...rs }; });
+                peers.update(p => { delete p[targetUserId]; return { ...p }; });
+                dataChannels.update(dc => { delete dc[targetUserId]; return { ...dc }; });
+            }
+        }
+
+        if (state === 'closed') {
+            if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; }
             turnRelayCallPeers.update(s => { s.delete(targetUserId); return new Set(s); });
             remoteStreams.update(rs => { delete rs[targetUserId]; return { ...rs }; });
             peers.update(p => { delete p[targetUserId]; return { ...p }; });

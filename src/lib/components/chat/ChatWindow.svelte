@@ -48,6 +48,18 @@
         ? `https://api.dicebear.com/9.x/avataaars/svg?seed=${otherUser.username}`
         : '';
 
+    $: p2pConnected = (() => {
+        if (conversation.type === 'dm') {
+            const other = conversation.members.find(m => m.userId !== currentUser.id);
+            if (!other) return false;
+            return chatDataChannels[other.userId]?.readyState === 'open';
+        }
+        return conversation.members.some(m =>
+            m.userId !== currentUser.id &&
+            chatDataChannels[m.userId]?.readyState === 'open'
+        );
+    })();
+
     $: statusText = (() => {
         if (conversation.type === 'group') {
             const online = conversation.members.filter(m =>
@@ -56,7 +68,9 @@
             );
             return $t('chatWindow.members', { total: conversation.members.length, online: online.length });
         }
-        return isOnline ? $t('chatWindow.online') : $t('chatWindow.offline');
+        if (isOnline && p2pConnected) return $t('chatWindow.online');
+        if (isOnline) return $t('chatWindow.connecting') || 'Connecting...';
+        return $t('chatWindow.offline');
     })();
 
     $: canSend = (() => {

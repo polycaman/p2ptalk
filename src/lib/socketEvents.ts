@@ -52,7 +52,7 @@ export function initSocketEvents(sock: Socket, pageData: any) {
         // Manage chat P2P connections
         const user = get(userData);
         if (status === 'online' && user && user.id < userId) {
-            initiateChatConnection(userId);
+            initiateChatConnection(userId); // async — awaits TURN internally
         } else if (status === 'offline') {
             cleanupChatPeer(userId);
         }
