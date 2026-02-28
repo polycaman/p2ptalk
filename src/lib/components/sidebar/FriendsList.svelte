@@ -7,6 +7,7 @@
     export let onStartCall: (id: string, isGroup: boolean) => void;
     export let onRemoveFriend: (id: string, name: string) => void;
     export let onOpenChat: (id: string) => void;
+    export let onDiagnostics: (id: string, name: string) => void;
 </script>
 
 <div class="friends-header">
@@ -41,6 +42,9 @@
                     <button class="call-icon" on:click={() => onStartCall(u.id, false)} title={$t('sidebar.call')}>
                         <i class="fas fa-phone"></i>
                     </button>
+                    <button class="diag-icon" on:click|stopPropagation={() => onDiagnostics(u.id, u.displayName || u.username)} title={$t('sidebar.diagnostics')}>
+                        <i class="fas fa-stethoscope"></i>
+                    </button>
                     <button class="icon-btn tiny reject" on:click={() => onRemoveFriend(u.id, u.username)} title={$t('sidebar.removeFriend')}>
                         <i class="fas fa-user-minus"></i>
                     </button>
@@ -74,9 +78,10 @@
     .name { font-size: 15px; font-weight: 500; color: #949ba4; transition: color 0.2s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .name.online-text { color: #fff; font-weight: 600; }
 
-    .call-icon, .chat-icon { border: none; background: none; cursor: pointer; opacity: 0.6; color: white; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; transition: background 0.2s; }
-    .call-icon:hover, .chat-icon:hover { background: #40444b; opacity: 1; }
+    .call-icon, .chat-icon, .diag-icon { border: none; background: none; cursor: pointer; opacity: 0.6; color: white; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; transition: background 0.2s; }
+    .call-icon:hover, .chat-icon:hover, .diag-icon:hover { background: #40444b; opacity: 1; }
     .chat-icon { color: #5865f2; }
+    .diag-icon { color: #f0b232; font-size: 13px; }
 
     .icon-btn.tiny { padding: 4px; font-size: 12px; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 4px; background: none; border: none; cursor: pointer; }
     .icon-btn.tiny.reject { color: #da373c; background: rgba(218, 55, 60, 0.1); }

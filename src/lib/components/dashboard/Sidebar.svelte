@@ -18,6 +18,7 @@
   export let onStartCall: (id: string, isGroup: boolean) => void;
   export let onRemoveFriend: (id: string, name: string) => void;
   export let onOpenChat: (id: string) => void;
+  export let onDiagnostics: (id: string, name: string) => void;
 </script>
 
 <aside class="sidebar-nav" class:mobile-active={showMobileMenu}>
@@ -32,6 +33,7 @@
         {onStartCall}
         {onRemoveFriend}
         {onOpenChat}
+        {onDiagnostics}
     />
 
     <AddFriendForm bind:addFriendUsername {socket} {userId} {form} />

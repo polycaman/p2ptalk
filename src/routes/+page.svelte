@@ -38,6 +38,7 @@
   import CallInterface from '$lib/components/call/CallInterface.svelte';
   import CreateRoomModal from '$lib/components/modals/CreateRoomModal.svelte';
   import IncomingCallModal from '$lib/components/modals/IncomingCallModal.svelte';
+  import DiagnosticsModal from '$lib/components/modals/DiagnosticsModal.svelte';
   import SettingsModal from '$lib/components/modals/SettingsModal.svelte';
   import InviteModal from '$lib/components/modals/InviteModal.svelte';
   import ChatView from '$lib/components/chat/ChatView.svelte';
@@ -58,6 +59,17 @@
 
   $: turnRelayTotal = $turnRelayCallPeers.size + $turnRelayChatPeers.size;
   $: isTurnRelayed = turnRelayTotal > 0;
+
+  // ─── Diagnostics ───────────────────────────────────────
+  let diagFriendId = '';
+  let diagFriendName = '';
+  let showDiagnostics = false;
+
+  function openDiagnostics(id: string, name: string) {
+      diagFriendId = id;
+      diagFriendName = name;
+      showDiagnostics = true;
+  }
 
   function openChat(friendId: string) {
       $socket.emit('get-or-create-dm', { friendId }, (response: any) => {
@@ -194,6 +206,7 @@
         onStartCall={startCall}
         onRemoveFriend={removeFriend}
         onOpenChat={openChat}
+        onDiagnostics={openDiagnostics}
     />
 
     {#if !$inCall}
@@ -244,6 +257,13 @@
             incomingCall={$incomingCall}
             on:accept={answerCall}
             on:reject={rejectCall}
+        />
+
+        <DiagnosticsModal
+            friendId={diagFriendId}
+            friendName={diagFriendName}
+            bind:show={showDiagnostics}
+            on:close={() => showDiagnostics = false}
         />
 
     {:else}
