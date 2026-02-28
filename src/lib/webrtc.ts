@@ -21,7 +21,7 @@ import {
     peers, dataChannels, localStream, localScreenStream,
     remoteStreams, initialRemoteState,
     messages, pendingTransfers, offeredFiles,
-    mediaE2eeEnabled, roomId, turnRelayCallPeers, currentRoomAllowTurn
+    mediaE2eeEnabled, roomId, turnRelayCallPeers
 } from '$lib/stores/callState';
 
 // ─── RTC Configuration ───────────────────────────────────
@@ -31,21 +31,47 @@ const STUN_SERVERS = [
     { urls: 'stun:global.stun.twilio.com:3478' }
 ];
 
-const TURN_SERVERS = [
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-];
+// TURN credentials are fetched from the server (time-limited HMAC)
+let cachedTurnServers: RTCIceServer[] = [];
+let turnFetchedAt = 0;
+
+export async function getTurnServers(): Promise<RTCIceServer[]> {
+    // Cache for 5 minutes (credentials are valid for 24h)
+    if (cachedTurnServers.length > 0 && Date.now() - turnFetchedAt < 5 * 60 * 1000) {
+        return cachedTurnServers;
+    }
+    try {
+        const res = await fetch('/api/turn-credentials');
+        if (res.ok) {
+            const data = await res.json();
+            cachedTurnServers = data.iceServers;
+            turnFetchedAt = Date.now();
+            return cachedTurnServers;
+        }
+    } catch (e) {
+        console.warn('[TURN] Failed to fetch credentials, using STUN only');
+    }
+    return [];
+}
 
 export const rtcConfig: any = {
     iceServers: [...STUN_SERVERS],
     encodedInsertableStreams: supportsMediaE2EE()
 };
 
-/** Build ICE config that includes TURN when allowed */
-export function getRtcConfig(allowTurn: boolean): RTCConfiguration & { encodedInsertableStreams?: boolean } {
+/** Build ICE config — always includes TURN */
+export async function getRtcConfigAsync(): Promise<RTCConfiguration & { encodedInsertableStreams?: boolean }> {
+    const turnServers = await getTurnServers();
     return {
-        iceServers: allowTurn ? [...STUN_SERVERS, ...TURN_SERVERS] : [...STUN_SERVERS],
+        iceServers: [...STUN_SERVERS, ...turnServers],
+        encodedInsertableStreams: supportsMediaE2EE()
+    };
+}
+
+/** Sync version — always includes cached TURN servers */
+export function getRtcConfig(): RTCConfiguration & { encodedInsertableStreams?: boolean } {
+    return {
+        iceServers: [...STUN_SERVERS, ...cachedTurnServers],
         encodedInsertableStreams: supportsMediaE2EE()
     };
 }
@@ -56,8 +82,7 @@ export function createPeerConnection(targetUserId: string): RTCPeerConnection {
     const currentPeers = get(peers);
     if (currentPeers[targetUserId]) return currentPeers[targetUserId];
 
-    const allowTurn = get(currentRoomAllowTurn);
-    const config = getRtcConfig(allowTurn);
+    const config = getRtcConfig();
     const peer = new RTCPeerConnection(config);
     peers.update(p => ({ ...p, [targetUserId]: peer }));
 
@@ -180,10 +205,7 @@ export function createPeerConnection(targetUserId: string): RTCPeerConnection {
             detectRelay(peer, targetUserId, 'call');
         }
         if (peer.iceConnectionState === 'failed') {
-            const allow = get(currentRoomAllowTurn);
-            if (!allow) {
-                alert(get(t)('alert.turnFailed'));
-            }
+            console.warn(`[WebRTC] ICE connection failed with ${targetUserId}`);
         }
         if (peer.iceConnectionState === 'disconnected' || peer.iceConnectionState === 'closed') {
             turnRelayCallPeers.update(s => { s.delete(targetUserId); return new Set(s); });

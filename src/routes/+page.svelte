@@ -28,7 +28,7 @@
   } from '$lib/callActions';
   import { handleFileSelect, requestFile } from '$lib/webrtc';
   import { initSocketEvents } from '$lib/socketEvents';
-  import { cleanupAllChatPeers } from '$lib/chatWebrtc';
+  import { cleanupAllChatPeers, initChatTurn } from '$lib/chatWebrtc';
   import { conversations, activeConversationId, unreadCounts, turnRelayChatPeers } from '$lib/stores/chatStore';
   import { initChatPersistence } from '$lib/chatPersistence';
 
@@ -93,6 +93,9 @@
 
     // Load persisted chat messages & start auto-save
     cleanupPersistence = initChatPersistence();
+
+    // Pre-fetch TURN credentials for chat P2P connections
+    initChatTurn();
 
     // Auto-join room if redirected from /room/[id]
     const autoJoinId = sessionStorage.getItem('autoJoinRoom');

@@ -19,9 +19,9 @@ import {
     noiseCancellation, echoCancellation, autoGainControl,
     messages, messageInput,
     audioSource, showSettings, showCreateRoomModal,
-    activeGroups, currentRoomAllowTurn
+    activeGroups
 } from '$lib/stores/callState';
-import { createPeerConnection } from '$lib/webrtc';
+import { createPeerConnection, getTurnServers } from '$lib/webrtc';
 
 // ─── Join Room ───────────────────────────────────────────
 
@@ -29,11 +29,9 @@ export async function joinRoom(id: string) {
     const sock = get(socket);
     const user = get(userData);
     try {
-        // Set TURN allowance from the active group data (if available)
-        const group = get(activeGroups).find((g: any) => g.id === id);
-        if (group?.allowTurn !== undefined) {
-            currentRoomAllowTurn.set(!!group.allowTurn);
-        }
+        // Pre-fetch TURN credentials so they're cached before peer connections
+        getTurnServers().catch(() => {});
+
         await loadDevices();
 
         // Generate E2EE key pair for this session
@@ -112,9 +110,6 @@ export function hangUp() {
 export function answerCall() {
     const ic = get(incomingCall);
     if (ic) {
-        if (ic.allowTurn !== undefined) {
-            currentRoomAllowTurn.set(!!ic.allowTurn);
-        }
         joinRoom(ic.callId);
     }
 }

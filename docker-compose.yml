@@ -7,6 +7,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}}
       ORIGIN: ${ORIGIN:-https://${DOMAIN}}
       NODE_ENV: ${NODE_ENV:-production}
+      TURN_DOMAIN: ${DOMAIN}
+      TURN_SECRET: ${TURN_SECRET}
     depends_on:
       db:
         condition: service_healthy
@@ -60,6 +62,21 @@ services:
     depends_on:
       - nginx
     entrypoint: ["sh", "/certbot-entrypoint.sh"]
+
+  turn:
+    image: coturn/coturn:alpine
+    restart: always
+    network_mode: host
+    volumes:
+      - ./turnserver.conf.template:/etc/turnserver.conf.template:ro
+      - ./turn-entrypoint.sh:/turn-entrypoint.sh:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    environment:
+      DOMAIN: ${DOMAIN}
+      TURN_SECRET: ${TURN_SECRET}
+    depends_on:
+      - certbot
+    entrypoint: ["sh", "/turn-entrypoint.sh"]
 
 volumes:
   db_data:

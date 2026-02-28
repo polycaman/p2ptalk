@@ -16,7 +16,7 @@ import {
     remoteStreams, initialRemoteState,
     isAudioMuted, isVideoMuted, isScreenSharing,
     localScreenStream, peers, dataChannels, messages,
-    currentRoomAllowTurn, peerUsernames
+    peerUsernames
 } from '$lib/stores/callState';
 import { createPeerConnection } from '$lib/webrtc';
 import { joinRoom, hangUp } from '$lib/callActions';
@@ -121,8 +121,7 @@ export function initSocketEvents(sock: Socket, pageData: any) {
         if (!get(inCall)) incomingCall.set(callData);
     });
 
-    sock.on('call-created', ({ callId, allowTurn }: { callId: string; allowTurn?: boolean }) => {
-        currentRoomAllowTurn.set(!!allowTurn);
+    sock.on('call-created', ({ callId }: { callId: string }) => {
         joinRoom(callId);
     });
 

@@ -22,15 +22,37 @@ const STUN_SERVERS = [
     { urls: 'stun:global.stun.twilio.com:3478' }
 ];
 
-const TURN_SERVERS = [
-    { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-    { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
-];
+// TURN credentials fetched from server
+let cachedChatTurn: RTCIceServer[] = [];
+let chatTurnFetchedAt = 0;
 
-const CHAT_RTC_CONFIG: RTCConfiguration = {
-    iceServers: [...STUN_SERVERS, ...TURN_SERVERS]
+async function getChatTurnServers(): Promise<RTCIceServer[]> {
+    if (cachedChatTurn.length > 0 && Date.now() - chatTurnFetchedAt < 5 * 60 * 1000) {
+        return cachedChatTurn;
+    }
+    try {
+        const res = await fetch('/api/turn-credentials');
+        if (res.ok) {
+            const data = await res.json();
+            cachedChatTurn = data.iceServers;
+            chatTurnFetchedAt = Date.now();
+            return cachedChatTurn;
+        }
+    } catch (e) {
+        console.warn('[TURN] Failed to fetch chat credentials');
+    }
+    return [];
+}
+
+let CHAT_RTC_CONFIG: RTCConfiguration = {
+    iceServers: [...STUN_SERVERS]
 };
+
+/** Call once on init to pre-fetch TURN credentials */
+export async function initChatTurn() {
+    const turn = await getChatTurnServers();
+    CHAT_RTC_CONFIG = { iceServers: [...STUN_SERVERS, ...turn] };
+}
 
 // ═══════════════════════════════════════════════════════════
 // Connection Management
