@@ -4,6 +4,9 @@
 listening-port=3478
 tls-listening-port=5349
 
+# Public IP of this server (auto-detected by entrypoint)
+external-ip=${EXTERNAL_IP}
+
 # Use the Let's Encrypt certificate (shared from certbot volume)
 cert=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
 pkey=/etc/letsencrypt/live/${DOMAIN}/privkey.pem
@@ -11,14 +14,26 @@ pkey=/etc/letsencrypt/live/${DOMAIN}/privkey.pem
 # Realm must match your domain
 realm=${DOMAIN}
 
-# Authentication
+# Required for WebRTC (RFC 5389 STUN fingerprint attribute)
+fingerprint
+
+# Authentication — HMAC-SHA1 shared-secret (REST API style)
+lt-cred-mech
 use-auth-secret
 static-auth-secret=${TURN_SECRET}
 
-# Performance
+# Relay port range — must be opened in firewall (UDP)
+min-port=49152
+max-port=65535
+
+# Performance & security
 total-quota=100
 stale-nonce=600
 no-multicast-peers
+no-cli
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
 
 # Logging
 log-file=stdout
