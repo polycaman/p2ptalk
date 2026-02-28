@@ -29,10 +29,12 @@ export async function joinRoom(id: string) {
     const sock = get(socket);
     const user = get(userData);
     try {
-        // Pre-fetch TURN credentials so they're cached before peer connections
-        getTurnServers().catch(() => {});
-
-        await loadDevices();
+        // Fetch TURN credentials AND load devices in parallel
+        // TURN MUST be resolved before sock.emit('join-room') triggers peer creation
+        await Promise.all([
+            getTurnServers().catch(() => console.warn('[TURN] Pre-fetch failed, will use STUN only')),
+            loadDevices()
+        ]);
 
         // Generate E2EE key pair for this session
         try {
