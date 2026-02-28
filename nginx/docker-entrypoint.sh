@@ -7,6 +7,9 @@
 
 set -e
 
+# openssl is not included in nginx:alpine — install it
+apk add --no-cache openssl >/dev/null 2>&1
+
 DOMAIN="${DOMAIN:-localhost}"
 CERT_DIR="/etc/letsencrypt/live/$DOMAIN"
 
@@ -18,7 +21,7 @@ if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
     openssl req -x509 -nodes -newkey rsa:2048 -days 1 \
         -keyout "$CERT_DIR/privkey.pem" \
         -out "$CERT_DIR/fullchain.pem" \
-        -subj "/CN=$DOMAIN" 2>/dev/null
+        -subj "/CN=$DOMAIN"
     echo "✓ Self-signed certificate created."
 else
     echo "✓ SSL certificate found for $DOMAIN"
