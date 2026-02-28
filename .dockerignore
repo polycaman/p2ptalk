@@ -1,0 +1,16 @@
+node_modules
+npm-debug.log
+.svelte-kit
+build
+.env
+.env.*
+!.env.example
+.git
+.gitignore
+*.md
+certbot
+nginx
+Dockerfile
+docker-compose.yml
+.DS_Store
+Thumbs.db

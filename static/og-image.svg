@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1e1f22"/>
+      <stop offset="100%" style="stop-color:#2b2d31"/>
+    </linearGradient>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#7289da"/>
+      <stop offset="100%" style="stop-color:#5865f2"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5865f2"/>
+      <stop offset="100%" style="stop-color:#4752c4"/>
+    </linearGradient>
+  </defs>
+  <!-- Background -->
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <!-- Subtle radial glow -->
+  <circle cx="600" cy="315" r="300" fill="#5865f2" opacity="0.06"/>
+  <!-- Left node -->
+  <circle cx="470" cy="260" r="52" fill="url(#g1)" opacity="0.9"/>
+  <!-- Right node -->
+  <circle cx="730" cy="260" r="52" fill="url(#g2)" opacity="0.9"/>
+  <!-- Connection arc top -->
+  <path d="M500 225 Q600 155 700 225" stroke="#7289da" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <!-- Connection arc bottom -->
+  <path d="M500 295 Q600 365 700 295" stroke="#4752c4" stroke-width="10" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <!-- Lock body -->
+  <rect x="578" y="250" width="44" height="32" rx="5" fill="#ffffff"/>
+  <!-- Lock shackle -->
+  <path d="M586 250 V240 Q586 226 600 226 Q614 226 614 240 V250" stroke="#ffffff" stroke-width="6" fill="none" stroke-linecap="round"/>
+  <!-- Lock keyhole -->
+  <circle cx="600" cy="263" r="5" fill="#5865f2"/>
+  <rect x="597.5" y="263" width="5" height="8" rx="1.5" fill="#5865f2"/>
+  <!-- Signal waves left -->
+  <path d="M434 230 Q420 260 434 290" stroke="#7289da" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <path d="M418 215 Q400 260 418 305" stroke="#7289da" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.3"/>
+  <!-- Signal waves right -->
+  <path d="M766 230 Q780 260 766 290" stroke="#4752c4" stroke-width="4" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <path d="M782 215 Q800 260 782 305" stroke="#4752c4" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.3"/>
+  <!-- Brand text -->
+  <text x="600" y="420" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-weight="800" font-size="56" fill="#ffffff" letter-spacing="-1">p2ptalk</text>
+  <!-- Tagline -->
+  <text x="600" y="465" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-weight="400" font-size="22" fill="#949ba4">Peer-to-peer encrypted communication</text>
+  <!-- Domain -->
+  <text x="600" y="560" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-weight="600" font-size="18" fill="#5865f2">p2ptalk.org</text>
+</svg>

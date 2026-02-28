@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#7289da;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#5865f2;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5865f2;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#4752c4;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- Left node (person/peer 1) -->
+  <circle cx="148" cy="256" r="72" fill="url(#grad1)" opacity="0.9"/>
+  <!-- Right node (person/peer 2) -->
+  <circle cx="364" cy="256" r="72" fill="url(#grad2)" opacity="0.9"/>
+  <!-- Connection arc top -->
+  <path d="M190 210 Q256 120 322 210" stroke="#7289da" stroke-width="16" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <!-- Connection arc bottom -->
+  <path d="M190 302 Q256 392 322 302" stroke="#4752c4" stroke-width="16" fill="none" stroke-linecap="round" opacity="0.7"/>
+  <!-- Lock body (encryption symbol) centered -->
+  <rect x="230" y="244" width="52" height="40" rx="6" fill="#ffffff"/>
+  <!-- Lock shackle -->
+  <path d="M240 244 V230 Q240 214 256 214 Q272 214 272 230 V244" stroke="#ffffff" stroke-width="8" fill="none" stroke-linecap="round"/>
+  <!-- Lock keyhole -->
+  <circle cx="256" cy="260" r="6" fill="#5865f2"/>
+  <rect x="253" y="260" width="6" height="10" rx="2" fill="#5865f2"/>
+  <!-- Signal waves from left node -->
+  <path d="M108 220 Q92 256 108 292" stroke="#7289da" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <path d="M88 200 Q64 256 88 312" stroke="#7289da" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.3"/>
+  <!-- Signal waves from right node -->
+  <path d="M404 220 Q420 256 404 292" stroke="#4752c4" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.5"/>
+  <path d="M424 200 Q448 256 424 312" stroke="#4752c4" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.3"/>
+</svg>

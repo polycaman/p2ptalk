@@ -1,0 +1,1 @@
+export { srcObject } from './srcObject';

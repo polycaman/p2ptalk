@@ -1,0 +1,2100 @@
+<script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
+  import { io } from 'socket.io-client';
+  import type { Socket } from 'socket.io-client';
+  import { enhance } from '$app/forms';
+  import Feed from '$lib/components/Feed.svelte';
+  // Removed static import to avoid SSR issues and module resolution errors in some envs
+  // import { RnnoiseWorkletNode, loadRnnoise } from '@sapphi-red/web-noise-suppressor';
+
+  export let data;
+  export let form; // Server actions result
+  
+  let socket: Socket;
+  
+  // UI State
+  let activeTab: 'feed' | 'rooms' = 'feed';
+  let inviteSearch = '';
+  let showCreateRoomModal = false;
+  let newRoomConfig = { name: '', scope: 'public' };
+  let addFriendUsername = '';
+  
+  // Friends List Feature
+  let friendSearch = '';
+  let onlineFriends: Record<string, boolean> = {}; // userId -> isOnline
+
+  $: filteredFriends = data.friends.filter((f: any) => 
+      f.username.toLowerCase().includes(friendSearch.toLowerCase())
+  );
+
+  // Audio Processing State
+  let audioContext: AudioContext | null = null;
+  let audioSource: MediaStreamAudioSourceNode | null = null;
+  let noiseSuppressorNode: any = null; // Type as any since we load dynamically
+  let audioDestination: MediaStreamAudioDestinationNode | null = null;
+  // Cache the WASM module
+  let rnnoiseWasmModule: WebAssembly.Module;
+  let inCall = false;
+  let roomId = '';
+  let incomingCall: any = null;
+  let activeGroups: any[] = [];
+  
+  // Media State
+  let localStream: MediaStream | null = null;
+  let localScreenStream: MediaStream | null = null;
+  
+  // Audio Test State
+  let testAudioContext: AudioContext | null = null;
+  let testAnalyser: AnalyserNode | null = null;
+  let testLevel = 0;
+  let testAnimationId: number;
+  let isTesting = false;
+
+  // Settings State
+  let showSettings = false;
+  let settingsTab: 'voice' | 'profile' = 'voice';
+  let updateUsername = ''; 
+  let updateDisplayName = '';
+  $: if(data && data.user) {
+    updateUsername = data.user.username;
+    updateDisplayName = data.user.displayName || data.user.username;
+  }
+
+  let audioInputs: MediaDeviceInfo[] = [];
+  let audioOutputs: MediaDeviceInfo[] = [];
+  let videoInputs: MediaDeviceInfo[] = [];
+  let selectedAudioInput = '';
+  let selectedAudioOutput = '';
+  let selectedVideoInput = '';
+  let noiseCancellation = true;
+  let echoCancellation = true;
+  let autoGainControl = true;
+
+  let isAudioMuted = false;
+  let isVideoMuted = true; // Default to video muted (Audio Only)
+  let isScreenSharing = false;
+
+  let peers: Record<string, RTCPeerConnection> = {};
+  let dataChannels: Record<string, RTCDataChannel> = {};
+
+  // Remote Streams: userId -> { cam?, screen?, camMuted?, micMuted? }
+  let remoteStreams: Record<string, { cam?: MediaStream, screen?: MediaStream, camMuted?: boolean, micMuted?: boolean }> = {};
+  let initialRemoteState: Record<string, { camMuted?: boolean, micMuted?: boolean }> = {};
+  
+  // UI State for Layout
+  let featuredView: { stream: MediaStream | null, label: string, id: string, isLocal: boolean, streamType: 'cam' | 'screen' } | null = null;
+  let isSidebarOpen = true; // In-call sidebar
+  let showMobileMenu = false; // Dashboard mobile menu
+  let showInviteModal = false;
+  let activeSpeakerId: string | null = null;
+
+  // Chat
+  let messages: { 
+      sender: string, 
+      content: string, 
+      type?: 'text'|'file', 
+      fileData?: any, 
+      fileId?: string,
+      progress?: number,
+      mimeType?: string,
+      fileSize?: number,
+      fileName?: string,
+      senderId?: string
+  }[] = [];
+  let messageInput = '';
+  // Track active file transfers per user/channel
+  let pendingTransfers: Record<string, { 
+      fileId: string, 
+      totalBytes: number, 
+      receivedBytes: number, 
+      chunks: ArrayBuffer[], 
+      mimeType: string 
+  }> = {};
+  let fileInput: HTMLInputElement;  let offeredFiles: Record<string, File> = {}; // Store local files for request
+  const rtcConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' }
+    ]
+  };
+
+  function srcObject(node: HTMLVideoElement, stream: MediaStream | null) {
+      const updateStream = (s: MediaStream | null) => {
+          if (s) {
+              node.srcObject = s;
+              node.play().catch(e => console.error("Auto-play failed", e));
+          } else {
+              node.srcObject = null;
+          }
+      };
+
+      updateStream(stream);
+
+      return {
+          update(newStream: MediaStream | null) {
+              updateStream(newStream);
+          }
+      }
+  }
+
+  function createPeerConnection(targetUserId: string): RTCPeerConnection {
+    if(peers[targetUserId]) return peers[targetUserId];
+
+    const peer = new RTCPeerConnection(rtcConfig);
+    peers[targetUserId] = peer;
+    
+    // Add Local Tracks
+    if (localStream) {
+       localStream.getTracks().forEach(track => peer.addTrack(track, localStream!));
+    }
+    if (localScreenStream) {
+       localScreenStream.getTracks().forEach(track => peer.addTrack(track, localScreenStream!));
+    }
+
+    const dc = peer.createDataChannel("file-transfer");
+    setupDataChannel(dc, targetUserId);
+
+    peer.ondatachannel = (e) => {
+        setupDataChannel(e.channel, targetUserId);
+    };
+
+    peer.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit('signal', {
+          to: targetUserId,
+          from: data.user.id,
+          signal: { candidate: event.candidate }
+        });
+      }
+    };
+    
+    peer.ontrack = (event) => {
+      const stream = event.streams[0];
+      const track = event.track;
+      
+      if (!remoteStreams[targetUserId]) remoteStreams[targetUserId] = {};
+      
+      // Determine if Cam or Screen
+      if (track.kind === 'video') {
+           if (remoteStreams[targetUserId].cam && remoteStreams[targetUserId].cam.id !== stream.id) {
+               // Only assume screen share if IDs are DIFFERENT.
+               // If IDs are same, it's just the video track arriving later than audio for the SAME stream.
+               remoteStreams[targetUserId].screen = stream;
+           } else {
+               // This is the main camera stream (either first time seen, or we only saw audio before)
+               remoteStreams[targetUserId].cam = stream;
+               
+               // Set initial mute state from track or stored state
+               // Only set it if we haven't already set it (to avoid overwriting if audio set it incorrectly? No, audio doesn't set camMuted)
+               const storedState = initialRemoteState[targetUserId]?.camMuted;
+               remoteStreams[targetUserId].camMuted = (storedState !== undefined) ? storedState : !track.enabled;
+           }
+      } else if (track.kind === 'audio') {
+           // Audio usually attaches to cam stream, but could be separate
+           // If cam not present but audio is, attach audio
+           if(!remoteStreams[targetUserId]) remoteStreams[targetUserId] = {};
+           if (!remoteStreams[targetUserId].cam) remoteStreams[targetUserId].cam = stream;
+           
+           const storedState = initialRemoteState[targetUserId]?.micMuted;
+           remoteStreams[targetUserId].micMuted = (storedState !== undefined) ? storedState : !track.enabled;
+      }
+      remoteStreams = {...remoteStreams};
+      
+      track.onmute = () => { /* handled by socket */ };
+      track.onunmute = () => { /* handled by socket usually */ };
+      track.onended = () => { /* handled elsewhere */ };
+    };
+    
+    peer.oniceconnectionstatechange = () => {
+        if (peer.iceConnectionState === 'disconnected' || peer.iceConnectionState === 'closed') {
+             delete remoteStreams[targetUserId];
+             remoteStreams = {...remoteStreams};
+             delete peers[targetUserId];
+             delete dataChannels[targetUserId];
+        }
+    };
+
+    return peer;
+  }
+  
+  function setupDataChannel(dc: RTCDataChannel, userId: string) {
+      dataChannels[userId] = dc;
+      dc.onmessage = (e) => {
+           const data = e.data;
+           if (typeof data === 'string') {
+               try {
+                  const meta = JSON.parse(data);
+                  if (meta.type === 'file-offer') {
+                       // Do not start transfer yet
+                       // Just show the message with download button
+                       // Clean filename just in case logic
+                       const cleanFileName = meta.fileName.replace(/\s*\(\d+(\.\d+)?\s*[KMGTP]?B\).*$/, '').trim(); 
+                       
+                       messages = [...messages, { 
+                         sender: 'Peer', 
+                         content: `Shared file: ${cleanFileName} (${formatBytes(meta.fileSize)})`, 
+                         fileName: cleanFileName,
+                         type: 'file',
+                         fileId: meta.fileId,
+                         fileData: null,
+                         progress: 0,
+                         mimeType: meta.mimeType,
+                         fileSize: meta.fileSize,
+                         senderId: userId // Store who sent it to request later
+                       }];
+                  } else if (meta.type === 'file-request') {
+                      startFileTransfer(meta.fileId, userId, meta.startByte || 0);
+                  }
+               } catch(e) {}
+           } else {
+               // Binary Chunk
+               // If no pending transfer, maybe initialize it now if we requested it?
+               // But we need to know WHICH file this chunk belongs to. 
+               // Simple protocol: If we requested a file, we expect chunks.
+               // We need to track which file we are currently receiving from this user.
+               
+               let transfer = pendingTransfers[userId];
+               
+               if (!transfer) {
+                   // This chunk arrived but we don't have a transfer object.
+                   // It might be the first chunk.
+                   // We need to find the message that is "waiting" for this file from this user.
+                   const msg = messages.find(m => m.senderId === userId && m.type === 'file' && m.progress === 0 && !m.fileData);
+                   if (msg) {
+                       transfer = {
+                           fileId: msg.fileId!,
+                           totalBytes: msg.fileSize!,
+                           receivedBytes: 0,
+                           chunks: [],
+                           mimeType: msg.mimeType || 'application/octet-stream'
+                       };
+                       pendingTransfers[userId] = transfer;
+                   }
+               }
+               
+               if (transfer) {
+                   transfer.chunks.push(data);
+                   transfer.receivedBytes += data.byteLength;
+                   
+                   // Find message to update progress
+                   const msgIndex = messages.findIndex(m => m.fileId === transfer.fileId);
+                   if (msgIndex !== -1) {
+                       const progress = Math.min(100, Math.round((transfer.receivedBytes / transfer.totalBytes) * 100));
+                       // Svelte reactivity requires assignment
+                       messages[msgIndex].progress = progress;
+                       
+                       if (transfer.receivedBytes >= transfer.totalBytes) {
+                           // Transfer Complete
+                           const blob = new Blob(transfer.chunks, { type: transfer.mimeType });
+                           messages[msgIndex].fileData = URL.createObjectURL(blob);
+                           messages[msgIndex].progress = 100; // Ensure 100%
+                           delete pendingTransfers[userId];
+                       }
+                       messages = messages; // Trigger update
+                   }
+               }
+           }
+      };
+  }
+
+  function formatBytes(bytes: number, decimals = 2) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const dm = decimals < 0 ? 0 : decimals;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+  }
+
+  onMount(async () => {
+    socket = io();
+
+    socket.on('connect', () => {
+      socket.emit('register-user', data.user.id);
+      // Initial check on connection
+      const friendIds = data.friends.map((f:any) => f.id);
+      if(friendIds.length > 0) socket.emit('check-friends-status', friendIds);
+    });
+
+    socket.on('friends-online-status', (statusMap) => {
+        onlineFriends = { ...onlineFriends, ...statusMap };
+    });
+
+    socket.on('friend-status-change', ({ userId, status }) => {
+        onlineFriends[userId] = (status === 'online');
+        // Trigger reactivity
+        onlineFriends = {...onlineFriends}; 
+    });
+
+    socket.on('friend-removed', (friendId) => {
+        data.friends = data.friends.filter((f:any) => f.id !== friendId);
+        // Also remove from online list
+        delete onlineFriends[friendId];
+        onlineFriends = {...onlineFriends};
+    });
+
+    // Periodic Check (every 30s) as requested
+    const statusInterval = setInterval(() => {
+        const friendIds = data.friends.map((f:any) => f.id);
+        if(friendIds.length > 0 && socket.connected) {
+             socket.emit('check-friends-status', friendIds);
+        }
+    }, 30000);
+
+    socket.on('active-calls', (calls) => {
+        activeGroups = calls;
+    });
+
+    socket.on('room-closed', () => {
+        alert('This room has been closed by the host.');
+        hangUp();
+    });
+
+    socket.on('incoming-call', (callData) => {
+        // Automatically add to list via reactivity (it should be in activeGroups if server broadcasts it)
+        // But we might need to manually ensure it's marked as invited if not yet synced
+        // For now, assume activeGroups update will follow or has happened.
+        // Actually, we should probably add this call to activeGroups if it's missing (e.g. private call)
+        const exists = activeGroups.find(g => g.id === callData.callId);
+        if (!exists) {
+            activeGroups = [...activeGroups, {
+                id: callData.callId,
+                name: callData.name,
+                initiatorId: callData.initiatorId,
+                scope: 'private', // Assumption
+                isInvited: true
+            }];
+        } else {
+             // Mark as invited
+             activeGroups = activeGroups.map(g => g.id === callData.callId ? { ...g, isInvited: true } : g);
+        }
+
+        if(!inCall) incomingCall = callData;
+    });
+
+    socket.on('call-created', ({ callId }) => {
+        joinRoom(callId);
+    });
+    
+    socket.on('join-room', (roomId, userId) => {
+        // ...
+    });
+
+    socket.on('user-toggled-media', (evt) => {
+        // Store initial state for future reference
+        if (!initialRemoteState[evt.userId]) initialRemoteState[evt.userId] = {};
+        if (evt.kind === 'video') initialRemoteState[evt.userId].camMuted = evt.muted;
+        if (evt.kind === 'audio') initialRemoteState[evt.userId].micMuted = evt.muted;
+
+        if (remoteStreams[evt.userId]) {
+            if (evt.kind === 'video') remoteStreams[evt.userId].camMuted = evt.muted;
+            if (evt.kind === 'audio') remoteStreams[evt.userId].micMuted = evt.muted;
+            if (evt.kind === 'screen' && evt.muted) {
+                 delete remoteStreams[evt.userId].screen;
+            }
+            remoteStreams = {...remoteStreams};
+        }
+    });
+
+    socket.on('user-connected', async (userId) => {
+      if (userId === data.user.id) return;
+      
+      // Send my current media state to the new user so they see me correctly
+      socket.emit('toggle-media', roomId, { userId: data.user.id, kind: 'video', muted: isVideoMuted });
+      socket.emit('toggle-media', roomId, { userId: data.user.id, kind: 'audio', muted: isAudioMuted });
+
+      const peer = createPeerConnection(userId);
+      try {
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+          socket.emit('signal', {
+              to: userId,
+              from: data.user.id,
+              signal: peer.localDescription
+          });
+      } catch(e) { console.error(e); }
+    });
+
+    socket.on('user-disconnected', (userId) => {
+       if(peers[userId]) {
+           peers[userId].close();
+           delete peers[userId];
+           const newSt = {...remoteStreams};
+           delete newSt[userId];
+           remoteStreams = newSt;
+           delete dataChannels[userId];
+           delete initialRemoteState[userId];
+       }
+    });
+
+    socket.on('signal', async ({ signal, from }) => {
+      if(from === data.user.id) return;
+      if (!peers[from]) createPeerConnection(from);
+      const peer = peers[from];
+      
+      try {
+          if (signal.type === 'offer') {
+            await peer.setRemoteDescription(new RTCSessionDescription(signal));
+            const answer = await peer.createAnswer();
+            await peer.setLocalDescription(answer);
+            socket.emit('signal', {
+              to: from,
+              from: data.user.id,
+              signal: peer.localDescription
+            });
+          } else if (signal.type === 'answer') {
+            await peer.setRemoteDescription(new RTCSessionDescription(signal));
+          } else if (signal.candidate) {
+             await peer.addIceCandidate(new RTCIceCandidate(signal.candidate));
+          }
+      } catch(e) { console.error('Signal error', e); }
+    });
+
+    socket.on('receive-message', (msg) => {
+        messages = [...messages, msg];
+    });
+  });
+
+  onDestroy(() => {
+    if (socket) socket.disconnect();
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+    if (localScreenStream) localScreenStream.getTracks().forEach(t => t.stop());
+  });
+
+  // --- ROOM / FRIEND LOGIC ---
+  function handleCreateRoom() {
+      if (!newRoomConfig.name) return;
+      socket.emit('create-call', {
+          initiatorId: data.user.id,
+          isGroup: true,
+          name: newRoomConfig.name,
+          scope: newRoomConfig.scope // 'public' | 'friends' | 'private'
+      });
+      showCreateRoomModal = false;
+      newRoomConfig = { name: '', scope: 'public' };
+  }
+
+  function isVisible(group: any): boolean {
+      if (group.isInvited) return true; // Invites override scope visibility
+      if (!group.scope || group.scope === 'public') return true;
+      if (group.initiatorId === data.user.id) return true;
+      
+      // Friends: Check if initiator is in my friends list
+      if (group.scope === 'friends') {
+          // If using real server data array
+          if (data.friends && Array.isArray(data.friends)) {
+              return data.friends.some((f: any) => f.id === group.initiatorId);
+          }
+      }
+      
+      return false;
+  }
+
+  async function startCall(targetId?: string, isGroup = false) {
+      let name = '';
+      if(isGroup) {
+          name = prompt('Group Name:') || 'New Group';
+      }
+      socket.emit('create-call', {
+          initiatorId: data.user.id,
+          targetIds: targetId ? [targetId] : [], 
+          isGroup,
+          name
+      });
+  }
+
+  async function joinRoom(id: string) {
+      try {
+        // Apply initial settings
+        const initialConstraints = {
+            audio: {
+                deviceId: selectedAudioInput ? { exact: selectedAudioInput } : undefined,
+                echoCancellation: echoCancellation, // Still useful
+                noiseSuppression: !noiseCancellation, // OFF if AI is ON
+                autoGainControl: autoGainControl
+            },
+            video: {
+                deviceId: selectedVideoInput ? { exact: selectedVideoInput } : undefined
+            }
+        };
+
+let stream = null;
+        try {
+            stream = await navigator.mediaDevices.getUserMedia(initialConstraints);
+            
+            // Immediately respect the initial isVideoMuted state
+            if (isVideoMuted) {
+                 stream.getVideoTracks().forEach(t => t.enabled = false);
+            }
+
+            // Apply AI if enabled
+            if (noiseCancellation) {
+                 try {
+                    /* 
+                    // TEMPORARILY DISABLED: Noise suppression package is missing
+                    if (!audioContext) audioContext = new AudioContext();
+                    if (audioContext.state === 'suspended') await audioContext.resume();
+
+                     // Dynamic import
+                    const { RnnoiseWorkletNode, loadRnnoise } = await import('@sapphi-red/web-noise-suppressor');
+
+                     // Load Modules if needed
+                    if (!rnnoiseWasmModule) {
+                        await audioContext.audioWorklet.addModule('/assets/rnnoise-worklet.js');
+                        rnnoiseWasmModule = await loadRnnoise({ url: '/assets/rnnoise.wasm' });
+                    }
+
+                    // Create Processing Graph
+                    audioSource = audioContext.createMediaStreamSource(stream);
+                    noiseSuppressorNode = new RnnoiseWorkletNode(audioContext, {
+                            wasmBinary: rnnoiseWasmModule,
+                            maxChannels: 1
+                    });
+                    audioDestination = audioContext.createMediaStreamDestination();
+
+                    audioSource.connect(noiseSuppressorNode);
+                    noiseSuppressorNode.connect(audioDestination);
+
+                    // Combine Processed Audio + Original Video
+                    const processedAudioTrack = audioDestination.stream.getAudioTracks()[0];
+                    const videoTracks = stream.getVideoTracks();
+                    stream = new MediaStream([processedAudioTrack, ...videoTracks]);
+                    */
+                   console.warn("Noise cancellation currently disabled due to missing dependency.");
+                 } catch(err) {
+                     console.error("AI Noise Cancellation failed on join, falling back", err);
+                 }
+            }
+        } catch (mediaError) {
+            console.warn("Camera/Mic access denied or unavailable. Joining without media.", mediaError);
+            alert("Could not access camera/microphone. You are entering the room in observer mode.");
+        }
+        
+        localStream = stream;
+        roomId = id;
+        socket.emit('join-room', id, data.user.id);
+        
+        // Broadcast initial state
+        socket.emit('toggle-media', id, { userId: data.user.id, kind: 'video', muted: true });
+        socket.emit('toggle-media', id, { userId: data.user.id, kind: 'audio', muted: true });
+
+        inCall = true;
+        incomingCall = null;
+      } catch(e) {
+          console.error(e);
+          // Only alert if it's a critical non-media error that prevents joining entirely
+          if (roomId !== id) {
+            alert('Failed to join room: ' + (e instanceof Error ? e.message : 'Unknown error'));
+          }
+      }
+  }
+
+  function answerCall() {
+      if(incomingCall) joinRoom(incomingCall.callId);
+  }
+  
+  function rejectCall() {
+      incomingCall = null;
+  }
+
+  function sendMessage() {
+      if(!messageInput) return;
+      const msg = { sender: data.user.username, content: messageInput, type: 'text' as const };
+      messages = [...messages, msg];
+      socket.emit('send-message', roomId, msg);
+      messageInput = '';
+  }
+
+  function toggleAudio() {
+      if (localStream) {
+          const track = localStream.getAudioTracks()[0];
+          track.enabled = !track.enabled;
+          isAudioMuted = !track.enabled;
+          socket.emit('toggle-media', roomId, { userId: data.user.id, kind: 'audio', muted: isAudioMuted });
+      }
+  }
+
+  function toggleVideo() {
+      if (localStream) {
+          const track = localStream.getVideoTracks()[0];
+          track.enabled = !track.enabled;
+          isVideoMuted = !track.enabled;
+          socket.emit('toggle-media', roomId, { userId: data.user.id, kind: 'video', muted: isVideoMuted });
+      }
+  }
+
+  async function shareScreen() {
+      if (isScreenSharing) return;
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        localScreenStream = stream;
+        isScreenSharing = true;
+
+        const track = localScreenStream.getVideoTracks()[0];
+        
+        for (const peer of Object.values(peers)) {
+             peer.addTrack(track, localScreenStream);
+             const offer = await peer.createOffer();
+             await peer.setLocalDescription(offer);
+             
+             const userId = Object.keys(peers).find(key => peers[key] === peer);
+             if(userId) {
+                 socket.emit('signal', {
+                     to: userId,
+                     from: data.user.id,
+                     signal: peer.localDescription
+                 });
+             }
+        }
+
+        track.onended = () => stopScreenShare();
+      } catch(e) { console.error(e); }
+  }
+
+  function stopScreenShare() {
+      if (!isScreenSharing || !localScreenStream) return;
+      
+      const track = localScreenStream.getVideoTracks()[0];
+      track.stop();
+      localScreenStream = null;
+      isScreenSharing = false;
+      
+      socket.emit('toggle-media', roomId, { userId: data.user.id, kind: 'screen', muted: true });
+  }
+  
+  async function handleFileSelect() {
+      if (!fileInput.files || fileInput.files.length === 0) return;
+      const file = fileInput.files[0];
+      const fileId = Math.random().toString(36).substr(7);
+      
+      const metadata = { 
+          type: 'file-offer', 
+          fileId, 
+          fileName: file.name, 
+          fileSize: file.size, 
+          sender: data.user.id,
+          mimeType: file.type || 'application/octet-stream' // Add MIME type
+      };
+      
+      const chunkSize = 16384; // 16KB chunks
+      
+      // Store file for later requests
+      offeredFiles[fileId] = file;
+      
+      // Send metadata first, wait for request
+      Object.keys(dataChannels).forEach((peerId) => {
+          const dc = dataChannels[peerId];
+          if (dc.readyState === 'open') {
+              dc.send(JSON.stringify(metadata));
+          }
+      });
+      
+      const cleanFileName = file.name.replace(/\s*\(\d+(\.\d+)?\s*[KMGTP]?B\).*$/, '').trim();
+      
+      messages = [...messages, { 
+          sender: 'You', 
+          content: `Shared file: ${cleanFileName}`, 
+          fileName: cleanFileName,
+          type: 'file',
+          fileId,
+          progress: 100, // Local is instant
+          fileData: URL.createObjectURL(file), // Local preview
+          mimeType: file.type
+      }];
+  }
+
+  async function startFileTransfer(fileId: string, targetPeerId: string, startByte = 0) {
+      const file = offeredFiles[fileId];
+      if (!file) return;
+      
+      const dc = dataChannels[targetPeerId];
+      if (!dc || dc.readyState !== 'open') return;
+      
+      const buffer = await file.arrayBuffer();
+      const chunkSize = 16384;
+      
+      for (let i = startByte; i < buffer.byteLength; i += chunkSize) {
+          const chunk = buffer.slice(i, i + chunkSize);
+           // Check if channel is buffered too much
+          if (dc.bufferedAmount > 16000000) { // 16MB limit
+               await new Promise(r => setTimeout(r, 100));
+          }
+          dc.send(chunk);
+      }
+  }
+
+  async function requestFile(msg: any) {
+      if(!msg.senderId) return;
+      
+      const peerId = msg.senderId;
+      const dc = dataChannels[peerId];
+      if (dc && dc.readyState === 'open') {
+          // Initialize pending transfer
+          pendingTransfers[peerId] = {
+               fileId: msg.fileId!,
+               totalBytes: msg.fileSize,
+               receivedBytes: 0,
+               chunks: [],
+               mimeType: msg.mimeType || 'application/octet-stream'
+          };
+          
+          // Request file
+          dc.send(JSON.stringify({ 
+              type: 'file-request', 
+              fileId: msg.fileId 
+          }));
+          
+          // Set progress to 1 so it shows progress bar
+          msg.progress = 1;
+          messages = messages;
+      }
+  }
+  
+  async function loadDevices() {
+      try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          audioInputs = devices.filter(d => d.kind === 'audioinput');
+          audioOutputs = devices.filter(d => d.kind === 'audiooutput');
+          videoInputs = devices.filter(d => d.kind === 'videoinput');
+          
+          // Sync with current stream if available
+          if (localStream) {
+              const audioTrack = localStream.getAudioTracks()[0];
+              if (audioTrack) {
+                  const settings = audioTrack.getSettings();
+                  if (settings.deviceId && settings.deviceId !== 'default') selectedAudioInput = settings.deviceId;
+                  if (settings.echoCancellation !== undefined) echoCancellation = settings.echoCancellation;
+                  if (settings.noiseSuppression !== undefined) noiseCancellation = settings.noiseSuppression;
+                  if (settings.autoGainControl !== undefined) autoGainControl = settings.autoGainControl;
+              }
+              
+              const videoTrack = localStream.getVideoTracks()[0];
+              if (videoTrack) {
+                  const settings = videoTrack.getSettings();
+                  if (settings.deviceId && settings.deviceId !== 'default') selectedVideoInput = settings.deviceId;
+              }
+          }
+          
+          // If nothing selected yet, force select the first available device
+          if ((!selectedAudioInput || selectedAudioInput === 'default') && audioInputs.length > 0) {
+              const preferred = audioInputs.find(d => d.deviceId !== 'default');
+              selectedAudioInput = preferred ? preferred.deviceId : audioInputs[0].deviceId;
+          } else if (!audioInputs.find(d => d.deviceId === selectedAudioInput) && audioInputs.length > 0) {
+              // If previously selected device is no longer available
+              selectedAudioInput = audioInputs[0].deviceId;
+          }
+
+          // Video default
+          if ((!selectedVideoInput || selectedVideoInput === 'default') && videoInputs.length > 0) {
+               const preferred = videoInputs.find(d => d.deviceId !== 'default');
+               selectedVideoInput = preferred ? preferred.deviceId : videoInputs[0].deviceId;
+          } else if (!videoInputs.find(d => d.deviceId === selectedVideoInput) && videoInputs.length > 0) {
+              selectedVideoInput = videoInputs[0].deviceId;
+          }
+          
+          // Force Svelte reactivity
+          audioInputs = [...audioInputs];
+          videoInputs = [...videoInputs];
+          audioOutputs = [...audioOutputs];
+
+          // Trigger update to ensure UI reflects state
+          if (audioInputs.length > 0 && !selectedAudioInput) selectedAudioInput = audioInputs[0].deviceId;
+          if (videoInputs.length > 0 && !selectedVideoInput) selectedVideoInput = videoInputs[0].deviceId;
+          
+          // Initial selection for Speakers (User Request: "Speakers appear empty")
+          if (audioOutputs.length > 0 && !selectedAudioOutput) {
+              selectedAudioOutput = audioOutputs[0].deviceId; // Select default
+          }
+          
+          // Audio output selection is only supported in some browsers (Chrome) via setSinkId
+          // if (!selectedAudioOutput && audioOutputs.length > 0) selectedAudioOutput = audioOutputs[0].deviceId;
+          // if (!selectedVideoInput && videoInputs.length > 0) selectedVideoInput = videoInputs[0].deviceId;
+      } catch(e) { console.error("Error loading devices", e); }
+  }
+
+  // --- AUDIO TEST HELPER ---
+  let testStream: MediaStream | null = null;
+  let animationFrame: number;
+
+  async function startMicrophoneTest() {
+      if (testStream) return;
+      try {
+          testStream = await navigator.mediaDevices.getUserMedia({
+              audio: { 
+                  deviceId: selectedAudioInput ? { exact: selectedAudioInput } : undefined 
+              }
+          });
+          
+          const audioCtx = new AudioContext();
+          const analyser = audioCtx.createAnalyser();
+          const microphone = audioCtx.createMediaStreamSource(testStream);
+          const javascriptNode = audioCtx.createScriptProcessor(2048, 1, 1);
+
+          analyser.smoothingTimeConstant = 0.8;
+          analyser.fftSize = 1024;
+
+          microphone.connect(analyser);
+          analyser.connect(javascriptNode);
+          javascriptNode.connect(audioCtx.destination);
+          
+          javascriptNode.onaudioprocess = () => {
+              if (!testStream) return;
+              const array = new Uint8Array(analyser.frequencyBinCount);
+              analyser.getByteFrequencyData(array);
+              let values = 0;
+              const length = array.length;
+              for (let i = 0; i < length; i++) {
+                  values += (array[i]);
+              }
+              const average = values / length;
+              // Normalize roughly 0-100% visualization
+              testLevel = Math.min(100, average * 3); 
+          }
+          
+          // Store cleanup
+          (window as any).stopMicTest = () => {
+              javascriptNode.disconnect();
+              microphone.disconnect();
+              analyser.disconnect();
+              audioCtx.close();
+              if(testStream) testStream.getTracks().forEach(t => t.stop());
+              testStream = null;
+              testLevel = 0;
+          };
+
+      } catch(e) { console.error("Mic Test Error", e); }
+  }
+
+  function stopMicrophoneTest() {
+      if ((window as any).stopMicTest) (window as any).stopMicTest();
+  }
+
+  function hasVideoTrack(stream: MediaStream | null): boolean {
+      return stream ? stream.getVideoTracks().length > 0 && stream.getVideoTracks()[0].enabled : false;
+  }
+
+  function inviteFriend(friendId: string) {
+      if(!roomId) return;
+      socket.emit('invite-to-room', {
+          roomId: roomId,
+          targetUserId: friendId,
+          senderId: data.user.id
+      });
+      showInviteModal = false;
+      alert('Invite sent!');
+  }
+
+  function deleteRoom(roomIdToDelete: string) {
+      if(!confirm('Are you sure you want to delete this room? This cannot be undone.')) return;
+      socket.emit('delete-room', roomIdToDelete, data.user.id);
+  }
+
+  function removeFriend(friendId: string, friendName: string) {
+      if(!confirm(`Are you sure you want to remove ${friendName} from your friends?`)) return;
+      socket.emit('remove-friend', { userId: data.user.id, friendId });
+  }
+
+  function hangUp() {
+      if(socket) socket.disconnect();
+      window.location.reload();
+  }
+
+  // --- Layout & View Logic --- //
+  function setFeatured(stream: MediaStream | null | undefined, label: string, id: string, isLocal: boolean, streamType: 'cam' | 'screen') {
+      if (!stream) return;
+      featuredView = { stream, label, id, isLocal, streamType };
+  }
+
+  function resetLayout() {
+      featuredView = null;
+  }
+
+  function toggleSidebar() {
+      isSidebarOpen = !isSidebarOpen;
+  }
+
+  async function applySettings() {
+      // If in call, update stream
+      if (inCall && localStream) {
+          // Stop old tracks - but handle separately if audioSource is using them
+          // Clean up old audio processing nodes if they exist
+          if (audioSource) { audioSource.disconnect(); audioSource = null; }
+          if (noiseSuppressorNode) { noiseSuppressorNode.disconnect(); noiseSuppressorNode.destroy(); noiseSuppressorNode = null; }
+          if (audioDestination) { audioDestination.disconnect(); audioDestination = null; }
+
+          localStream.getTracks().forEach(t => t.stop());
+          
+          try {
+              // 1. Get Base Stream
+              // If using AI Noise Cancellation, we turn OFF native Noise Suppression to feed clean signal to AI model
+              const useAiNoiseVideo = noiseCancellation;
+              
+              const newStream = await navigator.mediaDevices.getUserMedia({
+                  audio: {
+                      deviceId: selectedAudioInput ? { exact: selectedAudioInput } : undefined,
+                      echoCancellation: echoCancellation, // Still useful
+                      noiseSuppression: !useAiNoiseVideo, // OFF if AI is ON, ON if AI is OFF
+                      autoGainControl: autoGainControl
+                  },
+                  video: {
+                      deviceId: selectedVideoInput ? { exact: selectedVideoInput } : undefined
+                  }
+              });
+
+              let processedStream = newStream;
+
+              // 2. Apply AI Noise Cancellation if selected
+              if (useAiNoiseVideo) {
+                    try {
+                        /* DISABLED for now
+                        if (!audioContext) audioContext = new AudioContext();
+                        if (audioContext.state === 'suspended') await audioContext.resume();
+
+                        // Load Modules dynamically
+                        const { RnnoiseWorkletNode, loadRnnoise } = await import('@sapphi-red/web-noise-suppressor');
+
+                        if (!rnnoiseWasmModule) {
+                            // Load worklet from static assets
+                            await audioContext.audioWorklet.addModule('/assets/rnnoise-worklet.js');
+                            // Load WASM from static assets
+                            rnnoiseWasmModule = await loadRnnoise({ url: '/assets/rnnoise.wasm' });
+                        }
+
+                        // Create Processing Graph
+                        audioSource = audioContext.createMediaStreamSource(newStream);
+                        noiseSuppressorNode = new RnnoiseWorkletNode(audioContext, {
+                             wasmBinary: rnnoiseWasmModule,
+                             maxChannels: 1
+                        });
+                        audioDestination = audioContext.createMediaStreamDestination();
+
+                        audioSource.connect(noiseSuppressorNode);
+                        noiseSuppressorNode.connect(audioDestination);
+
+                        // Combine Processed Audio + Original Video
+                        const processedAudioTrack = audioDestination.stream.getAudioTracks()[0];
+                        const videoTracks = newStream.getVideoTracks();
+                        processedStream = new MediaStream([processedAudioTrack, ...videoTracks]);
+                        */
+                       console.warn("Noise cancellation currently disabled due to missing dependency.");
+
+                        // Keep original stream active so we don't lose the source
+                        // (The MediaStreamSource keeps it alive as long as tracks are enabled)
+                    } catch(err) {
+                        console.error("Failed to apply AI Noise Cancellation, falling back to standard", err);
+                        // Fallback: Enable standard suppression on track if possible, or just use raw
+                        // But we already got a stream with ns=false. To fix, one would re-request user media.
+                        // Or just proceed with raw.
+                        alert("AI Noise Cancellation failed to load. Check console.");
+                    }
+              }
+              
+              localStream = processedStream;
+              
+              // Update all peers with new tracks
+              Object.values(peers).forEach(peer => {
+                  const senders = peer.getSenders();
+                  senders.forEach(sender => {
+                      if (sender.track?.kind === 'audio') {
+                          const newTrack = processedStream.getAudioTracks()[0];
+                          if (newTrack) sender.replaceTrack(newTrack);
+                      }
+                      if (sender.track?.kind === 'video') {
+                          const newTrack = processedStream.getVideoTracks()[0];
+                          if (newTrack) sender.replaceTrack(newTrack);
+                      }
+                  });
+              });
+
+          } catch(e) { console.error("Error applying settings", e); }
+      }
+      showSettings = false;
+  }
+
+  function muteScreenAudio(e: MouseEvent, stream: MediaStream | undefined) {
+      e.preventDefault();
+      if (!stream) return;
+      
+      // Toggle audio tracks enabled state
+      stream.getAudioTracks().forEach(track => {
+           track.enabled = !track.enabled;
+           alert(`Screen Audio ${track.enabled ? 'Unmuted' : 'Muted'}`);
+      });
+  }
+</script>
+
+<div class="app-container">
+    {#if !inCall}
+        <!-- DASHBOARD LAYOUT (Unchanged) -->
+        <header>
+            <button class="mobile-menu-btn" on:click={() => showMobileMenu = !showMobileMenu} title="Toggle Menu">
+                <i class="fas" class:fa-bars={!showMobileMenu} class:fa-times={showMobileMenu}></i>
+            </button>
+            <div class="logo">Orbital Connect</div>
+            <div class="user-info">
+                   <img 
+                        src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${data.user.username}`} 
+                        alt="Me" 
+                        class="avatar-small" 
+                        style="width: 32px; height: 32px; border-radius: 50%; margin-right: 8px; border: 2px solid #5865f2; background: #2f3136;" 
+                   />
+                   <div style="display: flex; flex-direction: column; align-items: flex-end; margin-right: 8px;">
+                       <span style="font-weight: 600;">{data.user.displayName || data.user.username}</span>
+                       <span style="font-size: 10px; color: #b9bbbe;">@{data.user.username}</span>
+                   </div>
+                   <button class="icon-btn" on:click={() => { showSettings = true; loadDevices(); }} title="Settings">
+                       <i class="fas fa-cog"></i>
+                   </button>
+                   <form action="/logout" method="POST" use:enhance style="display:inline;">
+                       <button class="logout-btn"><i class="fas fa-sign-out-alt"></i> Logout</button>
+                   </form>
+            </div>
+        </header>
+
+        <main class="dashboard-grid">
+            {#if showMobileMenu}
+                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                <!-- svelte-ignore a11y-no-static-element-interactions -->
+                <div class="mobile-backdrop" on:click={() => showMobileMenu = false}></div>
+            {/if}
+            <aside class="sidebar-nav" class:mobile-active={showMobileMenu}>
+                <div class="section-label" style="padding: 16px 16px 8px;">FRIENDS</div>
+
+                <!-- PENDING REQUESTS -->
+                {#if data.friendRequests.length > 0}
+                    <div class="section-label">REQUESTS ({data.friendRequests.length})</div>
+                    <ul class="user-list">
+                        {#each data.friendRequests as req}
+                            <li>
+                                <div class="user-row">
+                                    <div class="user-info">
+                                        <div class="avatar small">
+                                            <img src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${req.username}`} alt={req.username} style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%; background: #2f3136;" />
+                                        </div>
+                                        <span class="name">{req.username}</span>
+                                    </div>
+                                    <div class="user-actions">
+                                        <form method="POST" action="?/acceptFriendRequest" use:enhance style="display:inline;">
+                                            <input type="hidden" name="requestId" value={req.id}>
+                                            <button class="icon-btn tiny accept" title="Accept Request"><i class="fas fa-check"></i></button>
+                                        </form>
+                                        <form method="POST" action="?/rejectFriendRequest" use:enhance style="display:inline;">
+                                            <input type="hidden" name="requestId" value={req.id}>
+                                            <button class="icon-btn tiny reject" title="Reject Request"><i class="fas fa-times"></i></button>
+                                        </form>
+                                    </div>
+                                </div>
+                            </li>
+                        {/each}
+                    </ul>
+                {/if}
+
+                <!-- FRIENDS LIST -->
+                <div class="friends-header">
+                    <input type="text" placeholder="Search friends..." bind:value={friendSearch} class="friend-search-input" />
+                </div>
+
+                <div style="flex: 1; overflow-y: auto;">
+                    <ul class="user-list">
+                        {#each filteredFriends as u}
+                        <li>
+                            <div class="user-row">
+                                <div class="user-info">
+                                    <div class="avatar small">
+                                        <img 
+                                            src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${u.username}`} 
+                                            alt={u.username}
+                                            style="width: 100%; height: 100%; object-fit: cover; border-radius: 50%; background: #2f3136;"
+                                        />
+                                        <div class="status-indicator" class:online={onlineFriends[u.id]}></div> 
+                                    </div>
+                                    <div style="display: flex; flex-direction: column;">
+                                        <span class="name" class:online-text={onlineFriends[u.id]}>{u.displayName || u.username}</span>
+                                        {#if u.displayName && u.displayName !== u.username}
+                                            <span style="font-size: 10px; color: #72767d;">@{u.username}</span>
+                                        {/if}
+                                    </div>
+                                </div>
+                                <div class="user-actions">
+                                    <button class="call-icon" on:click={() => startCall(u.id, false)} title="Call">
+                                        <i class="fas fa-phone"></i>
+                                    </button>
+                                    <button class="icon-btn tiny reject" on:click={() => removeFriend(u.id, u.username)} title="Remove Friend">
+                                        <i class="fas fa-user-minus"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </li>
+                    {:else}
+                        <li class="empty-state">No friends found.</li>
+                    {/each}
+                    </ul>
+                </div>
+
+                <!-- ADD FRIEND -->
+                <div class="add-friend-section">
+                    <form method="POST" action="?/sendFriendRequest" use:enhance>
+                        <input type="text" name="username" placeholder="Add friend by username" bind:value={addFriendUsername} required />
+                        <button type="submit" title="Send Request"><i class="fas fa-user-plus"></i></button>
+                    </form>
+                    {#if form?.error} <p class="error-msg">{form.error}</p> {/if}
+                    {#if form?.success} <p class="success-msg">{form.message || 'Request sent!'}</p> {/if}
+                </div>
+            </aside>
+
+            <section class="content-area">
+                <!-- TABS FOR CENTER CONTENT -->
+                <div class="center-tabs">
+                    <button 
+                        class="tab-link" 
+                        class:active={activeTab === 'feed'} 
+                        on:click={() => activeTab = 'feed'}>
+                        Home
+                    </button>
+                    <button 
+                        class="tab-link" 
+                        class:active={activeTab === 'rooms'} 
+                        on:click={() => activeTab = 'rooms'}>
+                        Live Channels 
+                        <span class="badge count-badge">{activeGroups.filter(g => isVisible(g)).length}</span>
+                    </button>
+                </div>
+
+                {#if activeTab === 'feed'}
+                    <Feed {socket} user={data.user} />
+                {:else}
+                    <div class="rooms-header">
+                        <h2>
+                            <i class="fas fa-hashtag"></i> Live Channels
+                        </h2>
+                        <button class="create-room-btn" on:click={() => showCreateRoomModal = true}>
+                            <i class="fas fa-plus"></i> Create Channel
+                        </button>
+                    </div>
+                    
+                    <div class="cards-grid">
+                        {#each activeGroups as group}
+                            {#if isVisible(group)}
+                                <div class="room-card" 
+                                    class:private={group.scope === 'private'} 
+                                    class:friends={group.scope === 'friends'}
+                                    class:invited={group.isInvited}> <!-- Use isInvited property -->
+                                    <div class="room-icon">
+                                        {#if group.isInvited} <i class="fas fa-envelope-open-text" title="Invited"></i>
+                                        {:else if group.scope === 'private'} <i class="fas fa-lock"></i>
+                                        {:else if group.scope === 'friends'} <i class="fas fa-user-friends"></i>
+                                        {:else} <i class="fas fa-globe"></i>
+                                        {/if}
+                                    </div>
+                                    <div class="room-details">
+                                        <h4>{group.name}</h4>
+                                        <small>
+                                            {#if group.isInvited} <span style="color: #5865f2; font-weight: bold;">Invited</span> • 
+                                            {:else if group.scope === 'private'} Private Call • 
+                                            {:else if group.scope === 'friends'} Friends Only • 
+                                            {:else} Public Group • 
+                                            {/if}
+                                            {group.initiatorDisplayName || group.initiatorName || 'User ' + group.initiatorId?.slice(0,4)}
+                                        </small>
+                                    </div>
+                                    <div class="room-actions">
+                                        <button on:click={() => joinRoom(group.id)}>Join Voice</button>
+                                        {#if group.initiatorId === data.user.id}
+                                            <button class="icon-btn delete-btn" title="Delete Room" on:click|stopPropagation={() => deleteRoom(group.id)}>
+                                                <i class="fas fa-trash-alt"></i>
+                                            </button>
+                                        {/if}
+                                    </div>
+                                </div>
+                            {/if}
+                        {/each}
+                        {#if activeGroups.filter(g => isVisible(g)).length === 0}
+                            <div class="empty-rooms">
+                                <i class="fas fa-wind" style="font-size: 48px; color: #444; margin-bottom: 16px;"></i>
+                                <p>No active channels found.</p>
+                                <button class="btn-link" on:click={() => showCreateRoomModal = true}>Create one now</button>
+                            </div>
+                        {/if}
+                    </div>
+                {/if}
+            </section>
+        </main>
+        
+        <!-- CREATE ROOM MODAL -->
+        {#if showCreateRoomModal}
+            <div class="modal-overlay">
+                <div class="settings-modal" style="width: 320px;">
+                    <h2>Create New Channel</h2>
+                    <div class="settings-content">
+                        <div class="form-group">
+                            <label>Channel Name</label>
+                            <input type="text" bind:value={newRoomConfig.name} placeholder="e.g. Chill Lounge" autofocus />
+                        </div>
+                        <div class="form-group">
+                            <label>Privacy</label>
+                            <!-- svelte-ignore a11y-no-onchange -->
+                            <select bind:value={newRoomConfig.scope}>
+                                <option value="public">Public (Everyone)</option>
+                                <option value="friends">Friends Only</option>
+                                <option value="private">Private (Invite Only)</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="settings-actions">
+                        <button class="btn-secondary" on:click={() => showCreateRoomModal = false}>Cancel</button>
+                        <button class="btn-primary" on:click={handleCreateRoom}>Create</button>
+                    </div>
+                </div>
+            </div>
+        {/if}
+
+        {#if incomingCall}
+            <div class="modal-overlay">
+                <div class="call-modal">
+                    <div class="caller-avatar">{incomingCall.name ? incomingCall.name[0] : 'U'}</div>
+                    <h3>Incoming Call...</h3>
+                    <p>{incomingCall.name || 'Private Call'}</p>
+                    <div class="call-actions">
+                        <button class="btn-decline" on:click={rejectCall}><i class="fas fa-clock"></i> Later</button>
+                        <button class="btn-accept" on:click={answerCall}><i class="fas fa-phone"></i> Accept</button>
+                    </div>
+                </div>
+            </div>
+        {/if}
+
+    {:else}
+        <!-- CALL INTERFACE LAYOUT -->
+        <div class="call-layout">
+            <div class="main-stage">
+                
+                <!-- FEATURED VIEW MODE -->
+                {#if featuredView}
+                     {@const isMuted = featuredView.id === 'local' ? isVideoMuted : (featuredView.streamType === 'cam' && remoteStreams[featuredView.id] ? remoteStreams[featuredView.id].camMuted : false)}
+                     <div class="featured-stage">
+                          <!-- svelte-ignore a11y-media-has-caption -->
+                          <!-- svelte-ignore a11y-click-events-have-key-events -->
+                          <!-- svelte-ignore a11y-no-static-element-interactions -->
+                          <div class="featured-video-container" on:dblclick={resetLayout}>
+                                <video autoplay playsinline use:srcObject={featuredView.stream} class:hidden={isMuted}></video>
+                                
+                                {#if isMuted}
+                                    <div class="avatar-placeholder" style="flex-direction: column;">
+                                        <div class="avatar-circle" style="width: 150px; height: 150px; font-size: 64px;">
+                                            <span>{featuredView.label[0]}</span>
+                                        </div>
+                                        <div class="status-icon video-off" style="position: static; margin-top: 16px;">
+                                            <i class="fas fa-video-slash"></i>
+                                        </div>
+                                    </div>
+                                {/if}
+                                
+                                <div class="nametag large">{featuredView.label} (Double Click to Reset)</div>
+                          </div>
+                     </div>
+
+                     <div class="sidebar-strip" class:closed={!isSidebarOpen}>
+                          <button class="toggle-sidebar-btn" on:click={toggleSidebar} title={isSidebarOpen ? "Collapse" : "Expand"}>
+                               <i class="fas" class:fa-chevron-right={isSidebarOpen} class:fa-chevron-left={!isSidebarOpen}></i>
+                          </button>
+                          
+                          {#if isSidebarOpen}
+                                <div class="strip-content">
+                                     <!-- Local Cam -->
+                                     <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                     <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                     {#if featuredView && featuredView.id !== 'local'}
+                                         <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                         <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                         <div class="strip-item" on:click={() => setFeatured(localStream, 'You', 'local', true, 'cam')}>
+                                              <video autoplay playsinline muted use:srcObject={localStream} class:hidden={isVideoMuted}></video>
+                                              {#if isVideoMuted} 
+                                                  <div class="icon-ov">
+                                                      <i class="fas fa-video-slash"></i>
+                                                  </div> 
+                                              {/if}
+                                              <span class="label">You</span>
+                                         </div>
+                                     {/if}
+
+                                     <!-- Local Screen (In sidebar if not featured) -->
+                                     {#if localScreenStream && featuredView?.id !== 'local-screen'}
+                                         <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                         <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                         <div class="strip-item" on:click={() => setFeatured(localScreenStream, 'You (Screen)', 'local-screen', true, 'screen')}>
+                                            <video autoplay playsinline muted use:srcObject={localScreenStream}></video>
+                                            <div class="nametag">You (Screen)</div>
+                                         </div>
+                                     {/if}
+
+                                     <!-- Remote Peers -->
+                                     {#each Object.entries(remoteStreams) as [uid, streams]}
+                                          {#if streams.cam && (featuredView?.id !== uid || featuredView?.streamType !== 'cam')}
+                                              <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                              <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                              <div class="strip-item" on:click={() => setFeatured(streams.cam, `User ${uid.slice(0,4)}`, uid, false, 'cam')}>
+                                                  <video autoplay playsinline use:srcObject={streams.cam} class:hidden={streams.camMuted}></video>
+                                                  {#if streams.camMuted} 
+                                                      <div class="icon-ov">
+                                                          <i class="fas fa-video-slash"></i>
+                                                      </div> 
+                                                  {/if}
+                                                  <span class="label">User {uid.slice(0,4)}</span>
+                                              </div>
+                                          {/if}
+                                          {#if streams.screen && (featuredView?.id !== uid + '-screen')}
+                                              <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                              <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                              <div class="strip-item" on:click={() => setFeatured(streams.screen, `User ${uid.slice(0,4)} Screen`, uid + '-screen', false, 'screen')}
+                                                   on:contextmenu={(e) => muteScreenAudio(e, streams.screen)}>
+                                                  <video autoplay playsinline use:srcObject={streams.screen}></video>
+                                                  <span class="label">Screen</span>
+                                              </div>
+                                          {/if}
+                                     {/each}
+                                </div>
+                          {/if}
+                     </div>
+
+                <!-- GRID VIEW MODE (Default) -->
+                {:else}
+                    <div class="video-grid">
+                         <!-- Local Cam -->
+                         <!-- svelte-ignore a11y-click-events-have-key-events -->
+                         <!-- svelte-ignore a11y-no-static-element-interactions -->
+                         <div class="video-container local" 
+                              class:audio-only={isVideoMuted || !hasVideoTrack(localStream)}
+                              on:click={() => setFeatured(localStream, 'You', 'local', true, 'cam')}>
+                             
+                             <video autoplay playsinline muted use:srcObject={localStream} class:hidden={isVideoMuted || !hasVideoTrack(localStream)}></video>
+                             
+                             {#if isVideoMuted || !hasVideoTrack(localStream)}
+                                <div class="avatar-placeholder">
+                                    <div class="avatar-circle">
+                                        <span>YOU</span>
+                                    </div>
+                                    <div class="status-icon video-off"><i class="fas fa-video-slash"></i></div>
+                                </div>
+                             {/if}
+
+                             <div class="nametag">You</div>
+                             {#if isAudioMuted}
+                                 <div class="status-icon" style="top: 12px; right: 12px; bottom: auto; background: #da373c; border: none; width: 28px; height: 28px;">
+                                     <i class="fas fa-microphone-slash" style="color: white; font-size: 14px;"></i>
+                                 </div>
+                             {/if}
+                         </div>
+    
+                         <!-- Local Screen -->
+                         {#if localScreenStream}
+                             <!-- svelte-ignore a11y-click-events-have-key-events -->
+                             <!-- svelte-ignore a11y-no-static-element-interactions -->
+                             <div class="video-container local screen" on:click={() => setFeatured(localScreenStream, 'You (Screen)', 'local-screen', true, 'screen')}>
+                                <video autoplay playsinline muted use:srcObject={localScreenStream}></video>
+                                <div class="nametag">You (Screen)</div>
+                             </div>
+                         {/if}
+    
+                         <!-- Remote Peers -->
+                        {#each Object.entries(remoteStreams) as [uid, streams]}
+                            <!-- Cam / Audio Peer -->
+                            {#if streams.cam}
+                                <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                <div class="video-container" 
+                                     class:speaking={activeSpeakerId === uid}
+                                     class:audio-only={!hasVideoTrack(streams.cam) || streams.camMuted}
+                                     on:click={() => setFeatured(streams.cam, `User ${uid.slice(0,4)}`, uid, false, 'cam')}>
+                                    
+                                    <video autoplay playsinline use:srcObject={streams.cam} class:hidden={!hasVideoTrack(streams.cam) || streams.camMuted}></video>
+                                    
+                                    {#if !hasVideoTrack(streams.cam) || streams.camMuted}
+                                        <div class="avatar-placeholder">
+                                            <div class="avatar-circle">
+                                                <span>{uid.slice(0, 2).toUpperCase()}</span>
+                                            </div>
+                                            {#if streams.camMuted}
+                                                <div class="status-icon video-off"><i class="fas fa-video-slash"></i></div>
+                                            {/if}
+                                        </div>
+                                    {/if}
+
+                                    <div class="nametag">
+                                        User {uid.slice(0,4)} 
+                                        {#if streams.micMuted} 
+                                            <i class="fas fa-microphone-slash" title="Microphone Muted"></i> 
+                                        {/if}
+                                    </div>
+                                </div>
+                            {/if}
+                            
+                            <!-- Screen Share -->
+                            {#if streams.screen}
+                                 <!-- svelte-ignore a11y-click-events-have-key-events -->
+                                 <!-- svelte-ignore a11y-no-static-element-interactions -->
+                                 <div class="video-container screen" 
+                                      on:click={() => setFeatured(streams.screen, `User ${uid.slice(0,4)}'s Screen`, uid + '-screen', false, 'screen')}
+                                      on:contextmenu={(e) => muteScreenAudio(e, streams.screen)}>
+                                     <video autoplay playsinline use:srcObject={streams.screen}></video>
+                                     <div class="nametag">User {uid.slice(0,4)}'s Screen (Right click to mute)</div>
+                                 </div>
+                             {/if}
+                         {/each}
+                    </div>
+                {/if}
+                
+                <!-- Controls -->
+                <div class="control-dock">
+                    {#if isScreenSharing}
+                        <button class="dock-btn active" on:click={stopScreenShare} title="Stop Screen Share">
+                            <i class="fas fa-stop"></i>
+                        </button>
+                    {:else}
+                        <button class="dock-btn" on:click={shareScreen} title="Share Screen">
+                            <i class="fas fa-desktop"></i>
+                        </button>
+                    {/if}
+
+                    <button class="dock-btn" class:muted={isVideoMuted} on:click={toggleVideo} title="Toggle Camera">
+                        {#if isVideoMuted} <i class="fas fa-video-slash"></i> {:else} <i class="fas fa-video"></i> {/if}
+                    </button>
+
+                    <button class="dock-btn" class:muted={isAudioMuted} on:click={toggleAudio} title="Toggle Microphone">
+                        {#if isAudioMuted} <i class="fas fa-microphone-slash"></i> {:else} <i class="fas fa-microphone"></i> {/if}
+                    </button>
+
+                    <button class="dock-btn" on:click={() => { showSettings = true; loadDevices(); }} title="Settings">
+                        <i class="fas fa-cog"></i>
+                    </button>
+
+                    <label class="dock-btn" title="Share File">
+                        <i class="fas fa-file-upload"></i>
+                        <input type="file" style="display:none" bind:this={fileInput} on:change={handleFileSelect}>
+                    </label>
+
+                    <button class="dock-btn invite" on:click={() => showInviteModal = true} title="Invite Friends">
+                         <i class="fas fa-user-plus"></i>
+                    </button>
+
+                    <button class="dock-btn hangup" on:click={hangUp} title="Leave">
+                        <i class="fas fa-phone-slash"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="chat-panel">
+                 <div class="chat-header">
+                     <i class="fas fa-comments"></i> Chat
+                 </div>
+                 <div class="chat-messages">
+                     {#each messages as msg}
+                         <div class="message-bubble" class:file-msg={msg.type === 'file'}>
+                             <strong>{msg.sender}</strong>
+                             {#if msg.type === 'file'}
+                                 <div class="file-attachment">
+                                     <i class="fas" class:fa-file={!msg.mimeType?.startsWith('image')} class:fa-image={msg.mimeType?.startsWith('image')}></i>
+                                     <span>{msg.content}</span>
+                                     {#if msg.fileData}
+                                         {#if msg.mimeType?.startsWith('image')}
+                                            <img src={msg.fileData} alt="Shared" class="shared-img-preview" />
+                                         {/if}
+                                         <a href={msg.fileData} download={msg.fileName || msg.content.split(':')[1]?.trim().replace(/\s*\(\d+(\.\d+)?\s*[KMGTP]?B\).*$/, '') || 'download'} class="download-btn">Download</a>
+                                     {:else if msg.progress === 0 && !msg.fileData}
+                                         <button class="download-btn" on:click={() => requestFile(msg)}>
+                                             <i class="fas fa-download"></i> Receive File
+                                         </button>
+                                     {:else}
+                                         <div class="progress-bar-container">
+                                             <div class="progress-bar" style="width: {msg.progress || 0}%"></div>
+                                         </div>
+                                         <span class="loading">{msg.progress || 0}%</span>
+                                     {/if}
+                                 </div>
+                             {:else}
+                                 <p>{msg.content}</p>
+                             {/if}
+                         </div>
+                     {/each}
+                 </div>
+                 <div class="chat-input">
+                     <input 
+                        bind:value={messageInput}
+                        on:keydown={e => e.key === 'Enter' && sendMessage()} 
+                        placeholder="Message channel..." 
+                     />
+                 </div>
+            </div>
+        </div>
+        <!-- INVITE MODAL (Inside Call) -->
+        {#if showInviteModal}
+             <div class="modal-overlay">
+                 <!-- svelte-ignore a11y-click-events-have-key-events -->
+                 <!-- svelte-ignore a11y-no-static-element-interactions -->
+                 <div class="settings-modal" style="width: 400px;" on:click|stopPropagation>
+                     <div class="rooms-header" style="margin-bottom: 16px;">
+                        <h2 style="font-size: 18px;">Invite Friends</h2>
+                        <button class="icon-btn" on:click={() => showInviteModal = false}><i class="fas fa-times"></i></button>
+                     </div>
+                     
+                     <div class="search-bar" style="margin-bottom: 16px;">
+                        <input 
+                            type="text" 
+                            bind:value={inviteSearch} 
+                            placeholder="Search friends..." 
+                            class="friend-search-input"
+                        />
+                     </div>
+
+                     <div class="settings-content" style="max-height: 300px; overflow-y: auto; padding-right: 4px;">
+                         {#if data.friends.length === 0}
+                             <p class="empty-state">No friends found.</p>
+                         {:else}
+                             {@const filteredInvites = data.friends.filter(f => f.username.toLowerCase().includes(inviteSearch.toLowerCase()))}
+                             {#if filteredInvites.length === 0}
+                                <p class="empty-state">No matches found.</p>
+                             {:else}
+                                <ul class="user-list">
+                                    {#each filteredInvites as friend}
+                                        <li class="user-row">
+                                            <div class="user-info">
+                                                <div class="avatar small">
+                                                    <img 
+                                                        src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${friend.username}`} 
+                                                        alt={friend.username}
+                                                        style="width: 100%; height: 100%; border-radius: 50%;"
+                                                    />
+                                                    <div class="status-indicator {onlineFriends[friend.id] ? 'online' : ''}"></div>
+                                                </div>
+                                                <span class="name" class:online-text={onlineFriends[friend.id]}>{friend.displayName || friend.username}</span>
+                                            </div>
+                                            <button 
+                                                class="btn-primary" 
+                                                style="padding: 4px 12px; font-size: 12px; height: 28px;"
+                                                on:click={() => inviteFriend(friend.id)}
+                                            >
+                                                Invite
+                                            </button>
+                                        </li>
+                                    {/each}
+                                </ul>
+                             {/if}
+                         {/if}
+                     </div>
+                 </div>
+             </div>
+        {/if}
+    {/if}
+
+    {#if showSettings}
+        <div class="modal-overlay">
+            <!-- svelte-ignore a11y-click-events-have-key-events -->
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div class="settings-modal" on:click|stopPropagation>
+                <h2>Settings</h2>
+                
+                <div class="settings-tabs" style="display: flex; gap: 16px; margin-bottom: 20px; border-bottom: 1px solid #1f2023;">
+                     <button 
+                        class="tab-link" 
+                        class:active={settingsTab === 'voice'} 
+                        on:click={() => settingsTab = 'voice'}
+                        style="background: none; border: none; padding: 8px 0; color: {settingsTab === 'voice' ? '#fff' : '#949ba4'}; border-bottom: 2px solid {settingsTab === 'voice' ? '#5865f2' : 'transparent'}; cursor: pointer; font-weight: 500; font-size: 14px;">
+                        Voice & Video
+                     </button>
+                     <button 
+                        class="tab-link" 
+                        class:active={settingsTab === 'profile'} 
+                        on:click={() => settingsTab = 'profile'}
+                        style="background: none; border: none; padding: 8px 0; color: {settingsTab === 'profile' ? '#fff' : '#949ba4'}; border-bottom: 2px solid {settingsTab === 'profile' ? '#5865f2' : 'transparent'}; cursor: pointer; font-weight: 500; font-size: 14px;">
+                        Profile
+                     </button>
+                </div>
+
+                <div class="settings-content">
+                    {#if settingsTab === 'voice'}
+                    <div class="form-group">
+                        <label for="mic-select">Microphone</label>
+                        <select id="mic-select" bind:value={selectedAudioInput} on:change={() => {
+                            if(testStream) { stopMicrophoneTest(); startMicrophoneTest(); }
+                        }}>
+                            {#each audioInputs as device}
+                                <option value={device.deviceId}>{device.label || `Microphone ${device.deviceId.slice(0,4)}`}</option>
+                            {/each}
+                        </select>
+                        <div class="test-mic-area">
+                             <button class="test-btn" on:click={startMicrophoneTest}>
+                                <i class="fas fa-microphone-alt"></i> Test
+                             </button>
+                             <div class="mic-level-container">
+                                <div class="mic-level-bar" style="width: {testLevel}%"></div>
+                             </div>
+                        </div>
+                    </div>
+                   
+                    {#if audioOutputs.length > 0}
+                    <div class="form-group">
+                        <label for="speaker-select">Speaker / Headphones</label>
+                        <select id="speaker-select" bind:value={selectedAudioOutput}>
+                            {#each audioOutputs as device}
+                                <option value={device.deviceId}>{device.label || `Speaker ${device.deviceId.slice(0,4)}`}</option>
+                            {/each}
+                        </select>
+                    </div>
+                    {/if}
+
+                    <div class="form-group">
+                        <label for="camera-select">Camera</label>
+                        <select id="camera-select" bind:value={selectedVideoInput}>
+                            {#each videoInputs as device}
+                                <option value={device.deviceId}>{device.label || `Camera ${device.deviceId.slice(0,4)}`}</option>
+                            {/each}
+                        </select>
+                    </div>
+
+                    <div class="checkbox-group">
+                        <label title="Start calls with camera off">
+                             <input type="checkbox" bind:checked={isVideoMuted}> 
+                             Join Audio Only
+                        </label>
+                        <label><input type="checkbox" bind:checked={echoCancellation}> Echo Cancellation</label>
+                        <label title="Uses AI Model (RNNoise) for superior voice clarity">
+                            <input type="checkbox" bind:checked={noiseCancellation}> 
+                            AI Noise Cancellation <span class="badge">BETA</span>
+                        </label>
+                        <label><input type="checkbox" bind:checked={autoGainControl}> Auto Gain Control</label>
+                    </div>
+                    {/if}
+
+                    {#if settingsTab === 'profile'}
+                        <div style="display: flex; flex-direction: column; align-items: center; gap: 24px; padding: 20px 0;">
+                            <img 
+                                src={`https://api.dicebear.com/9.x/avataaars/svg?seed=${data.user.username}`} 
+                                alt="Current Avatar" 
+                                style="width: 128px; height: 128px; border-radius: 50%; background: #2f3136; padding: 4px; border: 4px solid #5865f2;" 
+                            />
+                            
+                            <div style="width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 32px;">
+                                <!-- Display Name Form -->
+                                <form method="POST" action="?/updateDisplayName" use:enhance={() => {
+                                    return async ({ result }) => {
+                                        if (result.type === 'success') {
+                                            alert('Nickname updated successfully');
+                                            // Ideally we update local data without reload, but page reload is fine for now
+                                            location.reload(); 
+                                        } else if (result.type === 'failure') {
+                                            alert(result.data?.error || 'Failed to update nickname');
+                                        }
+                                    };
+                                }}>
+                                    <div class="form-group">
+                                        <label style="color: #b9bbbe; text-transform: uppercase; font-size: 12px; font-weight: 700; margin-bottom: 8px; display: block;">Display Name (Nickname)</label>
+                                        <div style="display: flex; gap: 10px;">
+                                            <input type="text" name="displayName" bind:value={updateDisplayName} required 
+                                                style="flex: 1; padding: 10px; background: #202225; border: 1px solid #202225; border-radius: 4px; color: white; font-size: 14px;" 
+                                                placeholder="How you appear to others" />
+                                            <button type="submit" class="btn-primary" style="width: auto; padding: 0 16px;">Save</button>
+                                        </div>
+                                    </div>
+                                </form>
+
+                                <div style="height: 1px; background: #2f3136; width: 100%;"></div>
+
+                                <!-- Username Form -->
+                                <form method="POST" action="?/updateUsername" use:enhance={() => {
+                                    return async ({ result }) => {
+                                        if (result.type === 'success') {
+                                            alert('Username updated. Please login with your new username next time.');
+                                            location.reload();
+                                        } else if (result.type === 'failure') {
+                                            alert(result.data?.error || 'Failed to update username');
+                                        }
+                                    };
+                                }}>
+                                    <div class="form-group">
+                                        <label style="color: #b9bbbe; text-transform: uppercase; font-size: 12px; font-weight: 700; margin-bottom: 8px; display: block;">Login Username</label>
+                                        <div style="display: flex; gap: 10px;">
+                                            <input type="text" name="username" bind:value={updateUsername} minlength="3" required 
+                                                style="flex: 1; padding: 10px; background: #202225; border: 1px solid #202225; border-radius: 4px; color: white; font-size: 14px;" 
+                                                placeholder="Unique login name" />
+                                            <button type="submit" class="btn-secondary" style="width: auto; padding: 0 16px; background-color: #ed4245; color: white;">Update</button>
+                                        </div>
+                                        <p style="font-size: 12px; color: #b9bbbe; margin-top: 8px;">
+                                            <i class="fas fa-info-circle"></i> Changing this will invalidate your current session credentials eventually.
+                                        </p>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                        <div class="settings-actions">
+                            <button class="btn-secondary" on:click={() => showSettings = false}>Close</button>
+                        </div>
+                    {/if}
+                </div>
+                
+                {#if settingsTab === 'voice'}
+                <div class="settings-actions">
+                    <button class="btn-secondary" on:click={() => { 
+                        stopMicrophoneTest();
+                        showSettings = false; 
+                    }}>Cancel</button>
+                    <button class="btn-primary" on:click={() => {
+                        stopMicrophoneTest();
+                        applySettings();
+                        showSettings = false;
+                    }}>Save Changes</button>
+                </div>
+                {/if}
+            </div>
+        </div>
+    {/if}
+</div>
+
+<style>
+    /* GLOBAL RESET */
+    :global(body) { margin: 0; font-family: 'gg sans', 'Helvetica Neue', Arial, sans-serif; background-color: #313338; color: #dbdee1; overflow: hidden; height: 100vh; }
+    
+    .app-container { display: flex; flex-direction: column; height: 100vh; }
+
+    header { height: 48px; background: #2b2d31; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid #1f2023; justify-content: space-between; }
+    .logo { font-weight: 800; font-size: 16px; color: #fff; margin-right: 0; }
+    header .user-info { margin-left: auto; justify-content: flex-end; gap: 8px; flex: 0 0 auto; min-width: auto; overflow: visible; }
+    .logout-btn { background: none; border: 1px solid #ed4245; color: #ed4245; padding: 4px 12px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+    .logout-btn:hover { background: #da373c; color: #fff; }
+
+    .dashboard-grid { display: grid; grid-template-columns: 280px 1fr; height: calc(100vh - 48px); }
+    .sidebar-nav { background: #2b2d31; padding: 12px 0; display: flex; flex-direction: column; }
+    .sidebar-nav h3 { padding: 0 16px; font-size: 12px; color: #949ba4; }
+    
+    .avatar { width: 40px; height: 40px; background: #5865f2; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin-right: 0; color: white; flex-shrink: 0; font-size: 16px; font-weight: 600; }
+    .call-icon { border: none; background: none; cursor: pointer; opacity: 0.6; color: white; display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; transition: background 0.2s; }
+    .call-icon:hover { background: #40444b; opacity: 1; }
+    
+    .content-area { padding: 24px; background: #313338; }
+    .room-card { background: #2b2d31; border-radius: 8px; padding: 16px; display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+    .room-icon { width: 48px; height: 48px; background: #41434a; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+
+    .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000; }
+    .call-modal { background: #2b2d31; padding: 32px; border-radius: 8px; text-align: center; width: 300px; }
+    .call-actions { display: flex; gap: 16px; justify-content: center; margin-top: 24px; }
+    .btn-accept { background: #23a559; color: white; border: none; padding: 12px 24px; border-radius: 50px; cursor: pointer; font-weight: bold; }
+    .btn-decline { background: #da373c; color: white; border: none; padding: 12px 24px; border-radius: 50px; cursor: pointer; font-weight: bold; }
+
+    /* CALL LAYOUT */
+    .call-layout { display: flex; height: 100vh; background: #000; }
+    .main-stage { flex: 1; display: flex; flex-direction: column; position: relative; overflow: hidden; }
+
+    /* GRID Mode */
+    .video-grid { flex: 1; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 16px; padding: 24px; overflow-y: auto; }
+    .video-container { 
+        background: #1e1f22; 
+        border-radius: 12px; 
+        overflow: hidden; 
+        position: relative; 
+        aspect-ratio: 4/3; 
+        width: 320px; /* Fixed base width */
+        max-width: 100%;
+        flex: 0 0 auto; /* Don't shrink */
+        border: 1px solid #1e1f22; 
+        display: flex; 
+        justify-content: center; 
+        align-items: center; 
+        cursor: pointer; 
+        transition: transform 0.2s, border-color 0.2s; 
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3); 
+    }
+    .video-container:hover { transform: scale(1.02); z-index: 10; border-color: #5865f2; }
+    .video-container video { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+    .video-container.screen { aspect-ratio: 16/9; width: 600px; max-width: 100%; max-height: none; }
+    .video-container.screen video { object-fit: contain; }
+    
+    /* FEATURED Mode */
+    .featured-stage { flex: 1; padding: 16px; display: flex; align-items: center; justify-content: center; background: #000; }
+    .featured-video-container { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; position: relative; }
+    .featured-video-container video { max-width: 100%; max-height: 100%; }
+    
+    .sidebar-strip { position: absolute; right: 0; top: 0; bottom: 80px; width: 220px; background: rgba(0,0,0,0.8); display: flex; flex-direction: column; transition: transform 0.3s; z-index: 100; border-left: 1px solid #333; }
+    .sidebar-strip.closed { transform: translateX(220px); }
+    
+    .toggle-sidebar-btn { position: absolute; left: -24px; top: 50%; transform: translateY(-50%); width: 24px; height: 48px; background: #333; border: none; color: white; border-top-left-radius: 8px; border-bottom-left-radius: 8px; cursor: pointer; }
+    
+    .strip-content { padding: 8px; overflow-y: auto; height: 100%; display: flex; flex-direction: column; gap: 8px; }
+    .strip-item { width: 100%; aspect-ratio: 16/9; background: #222; border-radius: 4px; overflow: hidden; position: relative; cursor: pointer; border: 2px solid transparent; }
+    .strip-item:hover { border-color: #5865f2; }
+    .strip-item video { width: 100%; height: 100%; object-fit: cover; }
+    .strip-item .label { position: absolute; bottom: 4px; left: 4px; font-size: 10px; background: rgba(0,0,0,0.6); padding: 2px 4px; border-radius: 2px; color: white; }
+    .icon-ov { position: absolute; top:0; left:0; right:0; bottom:0; display:flex; align-items:center; justify-content:center; background: #222; color: #da373c; }
+
+    /* COMMON */
+    .nametag { position: absolute; bottom: 12px; left: 12px; background: rgba(0,0,0,0.7); color: white; padding: 4px 8px; border-radius: 4px; font-size: 13px; font-weight: 500; }
+    .nametag.large { font-size: 18px; padding: 8px 16px; }
+    
+    .control-dock { height: 80px; background: #1e1f22; display: flex; align-items: center; justify-content: center; gap: 16px; z-index: 150; }
+    .dock-btn { width: 56px; height: 56px; border-radius: 50%; border: none; background: #2b2d31; color: #fff; font-size: 24px; cursor: pointer; transition: 0.2s; display: flex; align-items: center; justify-content: center; }
+    .dock-btn:hover { background: #35373c; }
+    .dock-btn.active { background: #ed4245; }
+    .dock-btn.muted { background: #da373c; } 
+    .dock-btn.hangup { background: #da373c; width: 64px; height: 64px; }
+
+    .chat-panel { width: 340px; background: #2b2d31; display: flex; flex-direction: column; border-left: 1px solid #1f2023; z-index: 150; }
+    .chat-messages { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; }
+    .message-bubble { background: #40444b; padding: 8px 12px; border-radius: 4px; }
+    .file-attachment { background: #2f3136; padding: 12px; border-radius: 4px; border: 1px solid #1e1f22; display: flex; flex-direction: column; gap: 8px; }
+    .shared-img-preview { max-width: 100%; border-radius: 4px; max-height: 200px; object-fit: contain; }
+    .progress-bar-container { height: 6px; background: #202225; border-radius: 3px; overflow: hidden; width: 100%; }
+    .progress-bar { height: 100%; background: #5865f2; transition: width 0.2s; }
+    .download-btn { background: #5865f2; color: white; padding: 4px 12px; border-radius: 3px; text-decoration: none; font-size: 12px; text-align: center; }
+    .chat-input { padding: 16px; background: #2b2d31; }
+    .chat-input input { width: 100%; padding: 12px; border-radius: 8px; background: #383a40; border: none; color: white; outline: none; }
+
+    /* SETTINGS MODAL */
+    .settings-modal { background: #313338; padding: 24px; border-radius: 8px; width: 400px; max-width: 90%; color: #dbdee1; display: flex; flex-direction: column; gap: 16px; }
+    .settings-modal h2 { margin-top: 0; margin-bottom: 16px; text-align: center; }
+    .badge { background: #5865f2; color: white; padding: 2px 4px; border-radius: 4px; font-size: 10px; margin-left: 4px; vertical-align: middle; }
+    .settings-content { display: flex; flex-direction: column; gap: 16px; }
+    .form-group { display: flex; flex-direction: column; gap: 8px; }
+    .form-group label { font-size: 12px; font-weight: bold; text-transform: uppercase; color: #949ba4; }
+    .form-group select { padding: 10px; border-radius: 4px; border: none; background: #1e1f22; color: #dbdee1; outline: none; }
+    .checkbox-group { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+    .checkbox-group label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+    .settings-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 8px; }
+    .btn-secondary { background: transparent; color: #fff; border: none; padding: 10px 20px; cursor: pointer; }
+    .btn-secondary:hover { text-decoration: underline; }
+    .btn-primary { background: #5865f2; color: white; border: none; padding: 10px 24px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+    .btn-primary:hover { background: #4752c4; }
+
+    .test-mic-area { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+    .test-btn { background: #40444b; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+    .test-btn:hover { background: #5865f2; }
+    .mic-level-container { flex: 1; height: 6px; background: #202225; border-radius: 3px; overflow: hidden; }
+    .mic-level-bar { height: 100%; background: #23a559; transition: width 0.1s; }
+
+    .icon-btn { background: none; border: none; color: #b5bac1; cursor: pointer; font-size: 18px; padding: 8px; margin-left: 8px; transition: color 0.2s; }
+    .icon-btn:hover { color: #fff; }
+
+    /* Audio Only / Avatar Styling */
+    .video-container.audio-only {
+        background-color: #2b2d31;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+    
+    video.hidden {
+        display: none !important;
+    }
+
+    .avatar-placeholder {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        position: relative;
+    }
+
+    .avatar-circle {
+        width: 100px; /* Increased Size */
+        height: 100px; /* Increased Size */
+        border-radius: 50%;
+        background-color: #5865f2; /* Discord-like blue */
+        background: linear-gradient(135deg, #5865f2 0%, #4752c4 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 36px;
+        font-weight: bold;
+        color: white;
+        margin-bottom: 8px;
+        box-shadow: 0 8px 16px rgba(0,0,0,0.4);
+        border: 4px solid rgba(255,255,255,0.1);
+        transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+    
+    .video-container:hover .avatar-circle {
+        transform: scale(1.1);
+    }
+
+    .status-icon {
+        position: absolute;
+        bottom: 30%; /* Adjust based on circle */
+        right: 40%;
+        background: #2b2d31;
+        border-radius: 50%;
+        width: 28px;
+        height: 28px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #ed4245;
+        border: 3px solid #2b2d31;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    }
+
+    .video-container.speaking {
+        border-color: #23a559;
+        box-shadow: 0 0 0 2px #23a559;
+    }
+
+    /* --- CENTER TABS (Feed vs Channels) --- */
+    .center-tabs {
+        display: flex;
+        border-bottom: 1px solid #2f3136;
+        margin-bottom: 24px;
+        position: sticky;
+        top: 0;
+        background: #313338; /* Match main bg */
+        z-index: 10;
+        padding-top: 8px;
+    }
+
+    .tab-link {
+        flex: 1;
+        background: none;
+        border: none;
+        padding: 16px 0;
+        color: #949ba4;
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 16px;
+        transition: background 0.2s, color 0.2s;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+    }
+
+    .tab-link:hover {
+        background-color: rgba(255,255,255,0.05);
+        color: #dbdee1;
+    }
+
+    .tab-link.active {
+        color: #fff;
+    }
+
+    .tab-link.active::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        background-color: #5865f2;
+        border-radius: 3px 3px 0 0;
+    }
+
+    .count-badge {
+        background: #ed4245;
+        color: white;
+        padding: 2px 6px;
+        border-radius: 10px;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: normal;
+    }
+
+    /* --- NEW CSS FOR FRIENDS & TABS --- */
+    .sidebar-tabs { display: flex; border-bottom: 2px solid #1e1f22; margin-bottom: 8px; }
+    .tab-btn { flex: 1; background: none; border: none; color: #949ba4; padding: 12px; cursor: pointer; font-weight: 500; transition: color 0.2s, background 0.2s; }
+    .tab-btn:hover { background: #35373c; color: #dbdee1; }
+    .tab-btn.active { color: #fff; border-bottom: 2px solid #5865f2; margin-bottom: -2px; }
+
+    .add-friend-section { padding: 16px; border-top: 1px solid #1f2023; margin-top: auto; }
+    .add-friend-section form { display: flex; gap: 8px; }
+    .add-friend-section input { flex: 1; padding: 8px; background: #1e1f22; border: none; border-radius: 4px; color: white; font-size: 13px; }
+    .add-friend-section button { background: #23a559; color: white; border: none; padding: 0 12px; border-radius: 4px; cursor: pointer; }
+    
+    .section-label { padding: 8px 16px; font-size: 11px; font-weight: 700; color: #949ba4; text-transform: uppercase; margin-top: 16px; }
+    
+    .icon-btn.tiny { padding: 4px; font-size: 12px; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 4px; }
+    .icon-btn.tiny.accept { color: #23a559; background: rgba(35, 165, 89, 0.1); }
+    .icon-btn.tiny.accept:hover { background: #23a559; color: white; }
+    .icon-btn.tiny.reject { color: #da373c; background: rgba(218, 55, 60, 0.1); }
+    .icon-btn.tiny.reject:hover { background: #da373c; color: white; }
+
+    .empty-state { padding: 16px; text-align: center; color: #949ba4; font-size: 13px; font-style: italic; }
+    .error-msg { color: #da373c; font-size: 12px; padding: 4px 0; margin: 0; }
+    .success-msg { color: #23a559; font-size: 12px; padding: 4px 0; margin: 0; }
+
+    .rooms-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+    .rooms-header h2 { margin: 0; display: flex; align-items: center; gap: 12px; font-size: 20px; }
+    .create-room-btn { background: #23a559; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-weight: 500; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: 0.2s; }
+    .create-room-btn:hover { background: #1a7f45; }
+
+    .cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+    .room-card { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; border: 1px solid #2b2d31; transition: transform 0.2s, background 0.2s; }
+    .room-card:hover { transform: translateY(-2px); background: #35373c; border-color: #404249; }
+    .room-card .room-details { width: 100%; }
+    .room-card h4 { margin: 0 0 4px 0; font-size: 16px; color: #f2f3f5; }
+    .room-card small { color: #b5bac1; display: flex; align-items: center; gap: 6px; }
+    .room-card button { width: 100%; margin-top: auto; padding: 8px; background: #5865f2; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500; }
+    .room-card button:hover { background: #4752c4; }
+    .room-card button.delete-btn { width: 40px; margin-left: auto; background: #da373c; display: flex; align-items: center; justify-content: center; flex: 0 0 40px !important; }
+    .room-card button.delete-btn:hover { background: #a1282c; }
+    
+    .room-actions { display: flex; gap: 8px; width: 100%; margin-top: auto; }
+    .room-actions button:first-child { flex: 1; }
+
+    /* FRIEND LIST STYLES */
+    .friends-header { padding: 0 16px 8px 16px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .friend-search-input { background: #1e1f22; border: 1px solid #1e1f22; color: white; padding: 10px 12px; font-size: 14px; border-radius: 4px; outline: none; width: 100%; box-sizing: border-box; }
+    .friend-search-input:focus { border-color: #5865f2; }
+    
+    .status-indicator { width: 14px; height: 14px; border-radius: 50%; background: #747f8d; position: absolute; bottom: -2px; right: -2px; border: 3px solid #2b2d31; }
+    .status-indicator.online { background: #23a559; }
+    .name { font-size: 15px; font-weight: 500; color: #949ba4; transition: color 0.2s; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .name.online-text { color: #fff; font-weight: 600; }
+    .avatar.small { width: 32px; height: 32px; font-size: 14px; position: relative; flex-shrink: 0; } 
+
+    .user-list { list-style: none; padding: 0 8px; margin: 0; display: flex; flex-direction: column; gap: 2px; flex: 1; overflow-y: auto; }
+    .user-row { display: flex; align-items: center; justify-content: space-between; padding: 8px; border-radius: 4px; cursor: pointer; transition: background 0.1s; height: 48px; }
+    .user-row:hover { background: #35373c; }
+    .user-row:hover .name { color: #dbdee1; }
+    .user-row .user-info { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; overflow: hidden; }
+    .user-row .user-actions { display: flex; align-items: center; gap: 4px; opacity: 0; transition: opacity 0.2s; flex-shrink: 0; }
+    .user-row:hover .user-actions { opacity: 1; }
+    .user-row .user-actions .icon-btn { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #2f3136; transition: all 0.2s; }
+    .user-row .user-actions .icon-btn:hover { background: #40444b; color: #fff; }
+    
+    .request-item { display: none; } /* Legacy cleanup */
+
+    .room-card.private { border-left: 4px solid #da373c; }
+    .room-card.friends { border-left: 4px solid #e0c20a; }
+    .room-card.invited { border-left: 4px solid #5865f2; background-color: rgba(88, 101, 242, 0.1); } /* Highlight invited rooms */
+
+    .empty-rooms { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px; border: 2px dashed #404249; border-radius: 8px; color: #949ba4; }
+    .btn-link { background: none; border: none; color: #00aff4; cursor: pointer; padding: 0; text-decoration: underline; font-size: inherit; }
+
+    /* Mobile Responsive */
+    .mobile-menu-btn { display: none; background: none; border: none; color: white; font-size: 20px; cursor: pointer; margin-right: 16px; }
+    .mobile-backdrop { display: none; }
+
+    /* Truncation for friends list names */
+    .user-info { flex: 1; min-width: 0; overflow: hidden; display: flex; align-items: center; }
+    .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+
+    @media (max-width: 768px) {
+        .dashboard-grid { grid-template-columns: 1fr; }
+        .sidebar-nav { 
+            position: fixed; 
+            top: 48px; 
+            bottom: 0; 
+            left: -100%; /* Hidden off-screen */
+            width: 80%; 
+            max-width: 320px; 
+            z-index: 1000; 
+            background: #2b2d31; 
+            transition: left 0.3s ease; 
+            box-shadow: 2px 0 5px rgba(0,0,0,0.5);
+        }
+        .sidebar-nav.mobile-active { left: 0; }
+        
+        .mobile-menu-btn { display: block; }
+        .mobile-backdrop { position: fixed; top: 48px; bottom: 0; left: 0; right: 0; background: rgba(0,0,0,0.5); z-index: 999; display: block; }
+
+        .friends-header { flex-direction: column; align-items: stretch; gap: 8px; }
+        .friend-search-input { width: 100%; box-sizing: border-box; } 
+        
+        .cards-grid { grid-template-columns: 1fr; } /* Stack room cards */
+    }
+</style>
