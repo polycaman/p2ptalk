@@ -16,17 +16,13 @@ fi
 
 # ── 1. Wait for nginx to be ready (serves ACME challenges) ─
 echo "▶ Waiting for nginx to start..."
-sleep 15
+sleep 20
 
 # ── 2. First-time certificate acquisition ────────────────
 # Check if certbot already manages a cert for this domain
 if [ ! -f "/etc/letsencrypt/renewal/$DOMAIN.conf" ]; then
     echo "▶ No Let's Encrypt certificate found for $DOMAIN"
     echo "  Requesting new certificate..."
-
-    # Remove self-signed cert that nginx created (so certbot starts clean)
-    rm -rf "/etc/letsencrypt/live/$DOMAIN"
-    rm -rf "/etc/letsencrypt/archive/$DOMAIN"
 
     certbot certonly --webroot \
         -w /var/www/certbot \
