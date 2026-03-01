@@ -170,7 +170,7 @@
                     class="avatar-small" 
                     style="width: 32px; height: 32px; border-radius: 50%; margin-right: 8px; border: 2px solid #5865f2; background: #2f3136;" 
                />
-               <div style="display: flex; flex-direction: column; align-items: flex-end; margin-right: 8px;">
+               <div class="user-name-col">
                    <span style="font-weight: 600;">{data.user.displayName || data.user.username}</span>
                    <span style="font-size: 10px; color: #b9bbbe;">@{data.user.username}</span>
                </div>
@@ -180,7 +180,7 @@
                </button>
                {#if !$inCall}
                    <form action="/logout" method="POST" use:enhance style="display:inline;">
-                       <button class="logout-btn"><i class="fas fa-sign-out-alt"></i> {$t('header.logout')}</button>
+                       <button class="logout-btn"><i class="fas fa-sign-out-alt"></i> <span class="logout-text">{$t('header.logout')}</span></button>
                    </form>
                {/if}
         </div>
@@ -443,10 +443,18 @@
         background: rgba(0,0,0,0.5); z-index: 999;
     }
 
+    .user-name-col { display: flex; flex-direction: column; align-items: flex-end; margin-right: 8px; }
+
     @media (max-width: 768px) {
         .content-area { padding: 16px; }
         .content-area.chat-active { padding: 0; }
-        header { padding: 0 12px; }
+        header { padding: 0 8px; gap: 4px; }
         .logo { font-size: 14px; }
+        .user-name-col { display: none; }
+        .logout-text { display: none; }
+        .logout-btn { padding: 6px 8px; border-radius: 50%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; }
+        header .user-info { gap: 4px; }
+        .icon-btn { margin-left: 0; padding: 6px; font-size: 16px; }
+        .friends-toggle-btn { margin-right: 4px; padding: 6px; }
     }
 </style>
