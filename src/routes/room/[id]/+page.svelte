@@ -97,7 +97,7 @@
 <style>
     .room-page {
         display: flex; align-items: center; justify-content: center;
-        height: 100vh; background: #1e1f22; color: #dbdee1;
+        height: 100vh; height: 100dvh; background: #1e1f22; color: #dbdee1;
         font-family: 'gg sans', 'Helvetica Neue', Arial, sans-serif;
         position: relative; overflow: hidden;
     }

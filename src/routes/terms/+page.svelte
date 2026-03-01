@@ -180,6 +180,7 @@
 
   .terms-page {
     min-height: 100vh;
+    min-height: 100dvh;
     background: #1e1f22;
     color: #dbdee1;
     padding: 32px 20px 64px;

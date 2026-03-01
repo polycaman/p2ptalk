@@ -383,5 +383,8 @@
     }
     .text-input-wrap textarea::placeholder { color: #72767d; }
 
-    @media (max-width: 768px) { .back-btn { display: block; } }
+    @media (max-width: 768px) {
+        .back-btn { display: block; }
+        .input-area { padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+    }
 </style>

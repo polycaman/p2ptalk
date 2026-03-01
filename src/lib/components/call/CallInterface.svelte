@@ -162,11 +162,11 @@
 <slot />
 
 <style>
-    .call-layout { display: flex; height: calc(100vh - 48px); background: #000; overflow: hidden; position: relative; }
+    .call-layout { display: flex; height: calc(100vh - 48px); height: calc(100dvh - 48px); background: #000; overflow: hidden; position: relative; }
     .main-stage { flex: 1; display: flex; flex-direction: column; position: relative; overflow: hidden; }
 
     @media (max-width: 768px) {
-        .call-layout { flex-direction: column; height: calc(100vh - 48px); position: relative; }
+        .call-layout { flex-direction: column; height: calc(100vh - 48px); height: calc(100dvh - 48px); position: relative; }
         .main-stage { flex: 1; height: auto; min-height: 0; }
     }
 </style>

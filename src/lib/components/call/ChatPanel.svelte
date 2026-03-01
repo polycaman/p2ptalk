@@ -340,7 +340,7 @@
     @media (max-width: 768px) {
         .chat-drawer {
             position: fixed; bottom: 0; left: 0; right: 0;
-            top: auto; height: 60vh;
+            top: auto; height: 60vh; height: 60dvh;
             flex-direction: column;
             transform: translateY(calc(100% - 40px));
         }
@@ -360,7 +360,7 @@
             box-shadow: 0 -4px 16px rgba(0,0,0,0.5);
         }
         .chat-messages { flex: 1; overflow-y: auto; min-height: 0; }
-        .chat-input-area { padding: 8px 12px; flex-shrink: 0; }
+        .chat-input-area { padding: 8px 12px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); flex-shrink: 0; }
         .input-row input { padding: 8px 4px; }
     }
 </style>

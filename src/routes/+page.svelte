@@ -325,8 +325,8 @@
 </div>
 
 <style>
-    :global(body) { margin: 0; font-family: 'gg sans', 'Helvetica Neue', Arial, sans-serif; background-color: #313338; color: #dbdee1; overflow: hidden; height: 100vh; }
-    .app-container { display: flex; flex-direction: column; height: 100vh; }
+    :global(body) { margin: 0; font-family: 'gg sans', 'Helvetica Neue', Arial, sans-serif; background-color: #313338; color: #dbdee1; overflow: hidden; height: 100vh; height: 100dvh; }
+    .app-container { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
     header { height: 48px; background: #2b2d31; display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid #1f2023; justify-content: space-between; }
     .logo { font-weight: 800; font-size: 16px; color: #fff; margin-right: 0; }
@@ -353,7 +353,7 @@
         50% { opacity: 0.7; }
     }
 
-    .dashboard-grid { display: grid; grid-template-columns: 1fr; height: calc(100vh - 48px); position: relative; }
+    .dashboard-grid { display: grid; grid-template-columns: 1fr; height: calc(100vh - 48px); height: calc(100dvh - 48px); position: relative; }
     .content-area { padding: 24px; background: #313338; overflow-y: auto; height: 100%; box-sizing: border-box; }
     .content-area.chat-active { padding: 0; overflow: hidden; display: flex; flex-direction: column; }
 
