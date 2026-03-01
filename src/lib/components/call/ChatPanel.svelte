@@ -231,9 +231,10 @@
     .chat-drawer > * { pointer-events: auto; }
     .chat-drawer.open { transform: translateX(0); }
 
-    /* Chevron tab pinned to the left edge of the drawer */
+    /* Chevron tab pinned to top-right of the call screen */
     .chat-chevron {
-        align-self: center;
+        align-self: flex-start;
+        margin-top: 12px;
         width: 28px;
         min-height: 72px;
         background: rgba(43, 45, 49, 0.92);
