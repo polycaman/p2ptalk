@@ -342,7 +342,7 @@
             position: fixed; bottom: 0; left: 0; right: 0;
             top: auto; height: 60vh;
             flex-direction: column;
-            transform: translateY(100%);
+            transform: translateY(calc(100% - 40px));
         }
         .chat-drawer.open { transform: translateY(0); }
         .chat-chevron {
