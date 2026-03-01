@@ -339,8 +339,9 @@
 
     @media (max-width: 768px) {
         .chat-drawer {
-            position: fixed; bottom: 0; left: 0; right: 0;
-            top: auto; height: 60vh; height: 60dvh;
+            position: fixed; left: 0; right: 0;
+            bottom: 80px; bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+            top: auto; height: 55vh; height: 55dvh;
             flex-direction: column;
             transform: translateY(calc(100% - 40px));
         }
