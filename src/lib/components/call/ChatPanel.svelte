@@ -342,18 +342,26 @@
             position: fixed; left: 0; right: 0;
             bottom: 80px; bottom: calc(80px + env(safe-area-inset-bottom, 0px));
             top: auto; height: 55vh; height: 55dvh;
-            flex-direction: column;
-            transform: translateY(calc(100% - 40px));
+            flex-direction: column-reverse;
+            transform: translateY(100%);
         }
         .chat-drawer.open { transform: translateY(0); }
         .chat-chevron {
-            align-self: center;
-            width: auto; min-height: auto;
-            padding: 6px 20px;
-            border-radius: 8px 8px 0 0;
-            border: 1px solid rgba(255,255,255,0.1);
-            border-bottom: none;
-            flex-direction: row; gap: 8px;
+            position: fixed; top: 56px; right: 8px;
+            width: 40px; height: 40px; min-height: auto;
+            padding: 0;
+            border-radius: 50%;
+            border: 1px solid rgba(255,255,255,0.15);
+            flex-direction: row; gap: 0;
+            z-index: 210;
+            background: rgba(88, 101, 242, 0.9);
+            color: #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        }
+        .chat-chevron i { font-size: 16px; }
+        .chevron-badge {
+            position: absolute; top: -4px; right: -4px;
+            min-width: 16px; height: 16px; font-size: 9px;
         }
         .chat-panel {
             width: 100%; flex: 1; border-left: none;
