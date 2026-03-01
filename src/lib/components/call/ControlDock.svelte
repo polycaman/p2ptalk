@@ -118,7 +118,8 @@
 
     @media (max-width: 768px) {
         .control-dock {
-            height: auto; padding: 12px 8px; display: flex; flex-wrap: wrap;
+            height: auto; padding: 12px 8px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+            display: flex; flex-wrap: wrap;
             justify-content: center; gap: 12px; background: #111; flex-shrink: 0;
         }
         .dock-btn { width: 44px; height: 44px; font-size: 18px; }
