@@ -14,7 +14,6 @@ export const userData = writable<any>(null);
 // ─── E2EE State ──────────────────────────────────────────
 export const localPublicKeyJwk = writable<JsonWebKey | null>(null);
 export const e2eePeerCount = writable(0);
-export const mediaE2eeEnabled = writable(false);
 export const e2eeActive = derived(e2eePeerCount, ($cnt) => $cnt > 0);
 
 // ─── UI State ────────────────────────────────────────────

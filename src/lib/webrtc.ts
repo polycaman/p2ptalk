@@ -5,23 +5,18 @@
  * the reactive UI stays in sync automatically.
  */
 import { get } from 'svelte/store';
-import { t } from '$lib/i18n';
 import {
-    generateKeyPair, deriveSharedKey, isE2EEReady,
+    isE2EEReady,
     encryptMessage, decryptMessage,
     encryptChunk, decryptChunk,
-    removePeerCrypto, resetCrypto, getE2EEPeerCount,
-    getPeerSharedKey
+    removePeerCrypto, resetCrypto, getE2EEPeerCount
 } from '$lib/crypto';
-import {
-    supportsMediaE2EE, setupSenderEncryption, setupReceiverDecryption
-} from '$lib/mediaEncrypt';
 import {
     socket, userData,
     peers, dataChannels, localStream, localScreenStream,
     remoteStreams, initialRemoteState,
     messages, pendingTransfers, offeredFiles,
-    mediaE2eeEnabled, roomId, turnRelayCallPeers
+    roomId, turnRelayCallPeers
 } from '$lib/stores/callState';
 
 // ─── RTC Configuration ───────────────────────────────────
@@ -70,24 +65,21 @@ export function ensureTurnReady(): Promise<RTCIceServer[]> {
 }
 
 export const rtcConfig: any = {
-    iceServers: [...STUN_SERVERS],
-    encodedInsertableStreams: supportsMediaE2EE()
+    iceServers: [...STUN_SERVERS]
 };
 
 /** Build ICE config — always includes TURN */
-export async function getRtcConfigAsync(): Promise<RTCConfiguration & { encodedInsertableStreams?: boolean }> {
+export async function getRtcConfigAsync(): Promise<RTCConfiguration> {
     const turnServers = await getTurnServers();
     return {
-        iceServers: [...STUN_SERVERS, ...turnServers],
-        encodedInsertableStreams: supportsMediaE2EE()
+        iceServers: [...STUN_SERVERS, ...turnServers]
     };
 }
 
 /** Sync version — always includes cached TURN servers */
-export function getRtcConfig(): RTCConfiguration & { encodedInsertableStreams?: boolean } {
+export function getRtcConfig(): RTCConfiguration {
     return {
-        iceServers: [...STUN_SERVERS, ...cachedTurnServers],
-        encodedInsertableStreams: supportsMediaE2EE()
+        iceServers: [...STUN_SERVERS, ...cachedTurnServers]
     };
 }
 
@@ -103,20 +95,6 @@ export function createPeerConnection(targetUserId: string): RTCPeerConnection {
 
     const sock = get(socket);
     const user = get(userData);
-
-    // E2EE: Key getter for this peer's transforms
-    const getKey = () => getPeerSharedKey(targetUserId);
-
-    // E2EE: Wrap addTrack to automatically set up sender encryption
-    if (supportsMediaE2EE()) {
-        const originalAddTrack = peer.addTrack.bind(peer);
-        (peer as any).addTrack = function (track: MediaStreamTrack, ...streams: MediaStream[]) {
-            const sender = originalAddTrack(track, ...streams);
-            const ok = setupSenderEncryption(sender, getKey);
-            if (ok) mediaE2eeEnabled.set(true);
-            return sender;
-        };
-    }
 
     // Add Local Tracks
     const ls = get(localStream);
@@ -148,12 +126,6 @@ export function createPeerConnection(targetUserId: string): RTCPeerConnection {
     peer.ontrack = (event) => {
         const stream = event.streams[0];
         const track = event.track;
-
-        // E2EE: Set up decryption on incoming media frames
-        if (supportsMediaE2EE()) {
-            const ok = setupReceiverDecryption(event.receiver, track, () => getPeerSharedKey(targetUserId));
-            if (ok) mediaE2eeEnabled.set(true);
-        }
 
         remoteStreams.update(rs => {
             if (!rs[targetUserId]) {
