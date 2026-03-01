@@ -164,6 +164,31 @@ export default function injectSocketIO(server: any) {
                 username: requester.username,
                 displayName: requester.displayName
             });
+
+            // Auto-create DM conversation so it appears in chats immediately
+            try {
+                const existingId = await findExistingDM(authenticatedUserId, requesterId!);
+                if (!existingId) {
+                    const [newConv] = await db.insert(conversationsTable).values({
+                        type: 'dm',
+                        createdBy: authenticatedUserId
+                    }).returning();
+
+                    await db.insert(conversationMembers).values([
+                        { conversationId: newConv.id, userId: authenticatedUserId, role: 'member' },
+                        { conversationId: newConv.id, userId: requesterId!, role: 'member' }
+                    ]);
+
+                    const members = await getConversationMembersList(newConv.id);
+                    const convResult = { ...newConv, members };
+
+                    // Push to both users' chat lists
+                    socket.emit('conversation-created', convResult);
+                    if (requesterSocket) {
+                        io.to(requesterSocket).emit('conversation-created', convResult);
+                    }
+                }
+            } catch (dmErr) { console.error('Error auto-creating DM after friend accept', dmErr); }
         } catch (e) { console.error('Error accepting friend request notification', e); }
     });
 
