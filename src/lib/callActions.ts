@@ -21,7 +21,7 @@ import {
     audioSource, showSettings, showCreateRoomModal,
     activeGroups
 } from '$lib/stores/callState';
-import { createPeerConnection, getTurnServers } from '$lib/webrtc';
+import { createPeerConnection, getTurnServers, ensureTurnReady } from '$lib/webrtc';
 
 // ─── Join Room ───────────────────────────────────────────
 
@@ -32,7 +32,7 @@ export async function joinRoom(id: string) {
         // Fetch TURN credentials AND load devices in parallel
         // TURN MUST be resolved before sock.emit('join-room') triggers peer creation
         await Promise.all([
-            getTurnServers().catch(() => console.warn('[TURN] Pre-fetch failed, will use STUN only')),
+            ensureTurnReady().catch(() => console.warn('[TURN] Pre-fetch failed, will use STUN only')),
             loadDevices()
         ]);
 

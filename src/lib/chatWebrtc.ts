@@ -390,7 +390,6 @@ export function sendChatMessage(
 
     const dcs = get(chatDataChannels);
     const myId = user.id;
-    let anyP2P = false;
 
     for (const member of conv.members) {
         if (member.userId === myId) continue;
@@ -401,15 +400,6 @@ export function sendChatMessage(
                 conversationId,
                 message: msg
             }));
-            anyP2P = true;
-        }
-    }
-
-    // Fallback: relay through server when P2P not available
-    if (!anyP2P) {
-        const sock = get(socket);
-        if (sock?.connected) {
-            sock.emit('relay-chat-message', { conversationId, message: msg });
         }
     }
 }
@@ -434,21 +424,11 @@ export function setTyping(conversationId: string, isTyping: boolean) {
         isTyping
     });
 
-    let anyP2P = false;
     for (const member of conv.members) {
         if (member.userId === user.id) continue;
         const dc = dcs[member.userId];
         if (dc && dc.readyState === 'open') {
             dc.send(payload);
-            anyP2P = true;
-        }
-    }
-
-    // Fallback: relay typing through server
-    if (!anyP2P) {
-        const sock = get(socket);
-        if (sock?.connected) {
-            sock.emit('relay-typing', { conversationId, username, isTyping });
         }
     }
 

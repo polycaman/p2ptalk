@@ -26,7 +26,7 @@
     deleteRoom, removeFriend, startCall,
     handleCreateRoom, handleInvite, isVisible
   } from '$lib/callActions';
-  import { handleFileSelect, requestFile, getTurnServers } from '$lib/webrtc';
+  import { handleFileSelect, requestFile, ensureTurnReady } from '$lib/webrtc';
   import { initSocketEvents } from '$lib/socketEvents';
   import { cleanupAllChatPeers, initChatTurn } from '$lib/chatWebrtc';
   import { conversations, activeConversationId, unreadCounts, turnRelayChatPeers } from '$lib/stores/chatStore';
@@ -107,7 +107,7 @@
     cleanupPersistence = initChatPersistence();
 
     // Pre-fetch TURN credentials for both call and chat P2P connections
-    getTurnServers().catch(() => {});
+    ensureTurnReady().catch(() => {});
     initChatTurn();
 
     // Auto-join room if redirected from /room/[id]

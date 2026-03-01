@@ -34,6 +34,7 @@ const STUN_SERVERS = [
 // TURN credentials are fetched from the server (time-limited HMAC)
 let cachedTurnServers: RTCIceServer[] = [];
 let turnFetchedAt = 0;
+let turnFetchPromise: Promise<RTCIceServer[]> | null = null;
 
 export async function getTurnServers(): Promise<RTCIceServer[]> {
     // Cache for 5 minutes (credentials are valid for 24h)
@@ -52,6 +53,20 @@ export async function getTurnServers(): Promise<RTCIceServer[]> {
         console.warn('[TURN] Failed to fetch credentials, using STUN only');
     }
     return [];
+}
+
+/**
+ * Ensure TURN credentials are loaded. Deduplicates concurrent calls.
+ * Safe to call from any handler — resolves quickly if already cached.
+ */
+export function ensureTurnReady(): Promise<RTCIceServer[]> {
+    if (cachedTurnServers.length > 0 && Date.now() - turnFetchedAt < 5 * 60 * 1000) {
+        return Promise.resolve(cachedTurnServers);
+    }
+    if (!turnFetchPromise) {
+        turnFetchPromise = getTurnServers().finally(() => { turnFetchPromise = null; });
+    }
+    return turnFetchPromise;
 }
 
 export const rtcConfig: any = {

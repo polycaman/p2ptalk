@@ -78,25 +78,9 @@
             const other = conversation.members.find(m => m.userId !== currentUser.id);
             if (!other) return false;
             const dc = chatDataChannels[other.userId];
-            // Allow sending via P2P or server relay (when friend is online)
-            return (!!dc && dc.readyState === 'open') || isOnline;
+            return !!dc && dc.readyState === 'open';
         }
         return conversation.members.some(m => {
-            if (m.userId === currentUser.id) return false;
-            const dc = chatDataChannels[m.userId];
-            return (dc && dc.readyState === 'open');
-        }) || isOnline;
-    })();
-
-    $: isRelayMode = (() => {
-        if (!isOnline || !canSend) return false;
-        if (conversation.type === 'dm') {
-            const other = conversation.members.find(m => m.userId !== currentUser.id);
-            if (!other) return false;
-            const dc = chatDataChannels[other.userId];
-            return !(dc && dc.readyState === 'open');
-        }
-        return !conversation.members.some(m => {
             if (m.userId === currentUser.id) return false;
             const dc = chatDataChannels[m.userId];
             return dc && dc.readyState === 'open';
@@ -260,11 +244,6 @@
                     {$t('chatWindow.offlineGroup')}
                 {/if}
             </div>
-        {:else if isRelayMode}
-            <div class="relay-banner">
-                <i class="fas fa-server" style="opacity: 0.7;"></i>
-                {$t('chatWindow.relayMode')}
-            </div>
         {/if}
         {#if canSend}
             <button class="attach-btn" on:click={() => fileInput.click()} title={$t('chatWindow.attach')}>
@@ -387,12 +366,6 @@
         flex: 1; text-align: center; color: #949ba4; font-size: 13px;
         padding: 8px; background: #1e1f22; border-radius: 8px;
         display: flex; align-items: center; justify-content: center; gap: 8px;
-    }
-    .relay-banner {
-        display: flex; align-items: center; justify-content: center; gap: 6px;
-        padding: 4px 12px; color: #faa61a; font-size: 11px;
-        background: rgba(250, 166, 26, 0.08); border-radius: 6px; margin-bottom: 4px;
-        width: 100%;
     }
     .attach-btn, .send-btn {
         background: none; border: none; color: #b5bac1; cursor: pointer;
